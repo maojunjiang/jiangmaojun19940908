@@ -1,6 +1,8 @@
 const form = document.querySelector("#parse-form");
 const urlInput = document.querySelector("#note-url");
 const submitButton = document.querySelector("#submit-button");
+const historyButton = document.querySelector("#history-button");
+const historyMenu = document.querySelector("#history-menu");
 const statusCard = document.querySelector("#status-card");
 const emptyState = document.querySelector("#empty-state");
 const resultCard = document.querySelector("#result-card");
@@ -13,11 +15,18 @@ const carouselDots = document.querySelector("#carousel-dots");
 const resultTitle = document.querySelector("#result-title");
 const resultBody = document.querySelector("#result-body");
 const resultTags = document.querySelector("#result-tags");
+const resultImageLinks = document.querySelector("#result-image-links");
+const tabImages = document.querySelector("#tab-images");
+const tabVideos = document.querySelector("#tab-videos");
+const copyAllImagesButton = document.querySelector("#copy-all-images-button");
 const resultPrompt = document.querySelector("#result-prompt");
 const copyPromptButton = document.querySelector("#copy-prompt-button");
 
 const FALLBACK_IMAGE =
   "https://images.unsplash.com/photo-1517841905240-472988babdf9?auto=format&fit=crop&w=1200&q=80";
+const MAX_REFERENCE_MEDIA = 14;
+const HISTORY_STORAGE_KEY = "note-parser:url-history";
+const HISTORY_LIMIT = 12;
 
 const SAMPLE_TAGS = ["内容解析", "链接抓取", "笔记结构化"];
 
@@ -32,6 +41,16 @@ const swipeState = {
 };
 
 let copyPromptResetTimer = 0;
+let copyAllImagesResetTimer = 0;
+let urlHistory = loadUrlHistory();
+const mediaLinkState = {
+  activeTab: "images",
+  images: [],
+  videos: [],
+};
+
+warnIfOpenedFromFile();
+renderUrlHistory();
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -57,6 +76,7 @@ form.addEventListener("submit", async (event) => {
   try {
     const result = await parseNoteFromUrl(noteUrl);
     renderResult(result);
+    pushUrlHistory(noteUrl);
 
     const hasFallback = Boolean(result?.meta?.usedFallback);
     setStatus(
@@ -86,6 +106,10 @@ carouselNext.addEventListener("click", () => {
   moveCarousel(1);
 });
 
+historyButton.addEventListener("click", () => {
+  toggleHistoryMenu();
+});
+
 copyPromptButton.addEventListener("click", async () => {
   const promptText = resultPrompt.value.trim();
   if (!promptText || promptText === "-") {
@@ -99,6 +123,29 @@ copyPromptButton.addEventListener("click", async () => {
   } catch (error) {
     flashCopyButton("复制失败");
   }
+});
+
+copyAllImagesButton.addEventListener("click", async () => {
+  const currentUrls = getExportableMediaUrls();
+  if (!currentUrls.length) {
+    flashAllImagesButton(mediaLinkState.activeTab === "videos" ? "暂无视频" : "暂无图片");
+    return;
+  }
+
+  try {
+    await copyText(JSON.stringify(currentUrls, null, 2));
+    flashAllImagesButton("已复制");
+  } catch (error) {
+    flashAllImagesButton("复制失败");
+  }
+});
+
+tabImages.addEventListener("click", () => {
+  switchMediaTab("images");
+});
+
+tabVideos.addEventListener("click", () => {
+  switchMediaTab("videos");
 });
 
 resultImage.addEventListener("touchstart", (event) => {
@@ -132,6 +179,10 @@ resultImage.addEventListener("touchend", () => {
 });
 
 document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") {
+    closeHistoryMenu();
+  }
+
   if (resultCard.classList.contains("hidden") || carouselState.images.length <= 1) {
     return;
   }
@@ -144,6 +195,117 @@ document.addEventListener("keydown", (event) => {
     moveCarousel(1);
   }
 });
+
+document.addEventListener("click", (event) => {
+  if (
+    historyMenu.classList.contains("hidden") ||
+    historyMenu.contains(event.target) ||
+    historyButton.contains(event.target)
+  ) {
+    return;
+  }
+
+  closeHistoryMenu();
+});
+
+function warnIfOpenedFromFile() {
+  if (window.location.protocol !== "file:") {
+    return;
+  }
+
+  setStatus(
+    "error",
+    "请通过本地服务打开",
+    "不要直接双击 index.html。请先运行 node server.js，再访问 http://127.0.0.1:3000/。"
+  );
+  submitButton.disabled = true;
+  urlInput.placeholder = "请先启动本地服务，再在浏览器里访问 http://127.0.0.1:3000/";
+}
+
+function loadUrlHistory() {
+  try {
+    const raw = window.localStorage.getItem(HISTORY_STORAGE_KEY);
+    const parsed = JSON.parse(raw || "[]");
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+
+    return parsed
+      .map((item) => String(item || "").trim())
+      .filter(Boolean)
+      .slice(0, HISTORY_LIMIT);
+  } catch (error) {
+    return [];
+  }
+}
+
+function saveUrlHistory() {
+  try {
+    window.localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(urlHistory));
+  } catch (error) {
+    return;
+  }
+}
+
+function pushUrlHistory(noteUrl) {
+  const normalized = String(noteUrl || "").trim();
+  if (!normalized) {
+    return;
+  }
+
+  urlHistory = [normalized, ...urlHistory.filter((item) => item !== normalized)].slice(0, HISTORY_LIMIT);
+  saveUrlHistory();
+  renderUrlHistory();
+}
+
+function renderUrlHistory() {
+  historyMenu.innerHTML = "";
+
+  if (!urlHistory.length) {
+    const empty = document.createElement("div");
+    empty.className = "history-empty";
+    empty.textContent = "还没有历史记录，成功解析过的链接会出现在这里。";
+    historyMenu.appendChild(empty);
+    return;
+  }
+
+  urlHistory.forEach((item) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "history-item";
+    button.textContent = item;
+    button.title = item;
+    button.addEventListener("click", () => {
+      urlInput.value = item;
+      closeHistoryMenu();
+      urlInput.focus();
+    });
+    historyMenu.appendChild(button);
+  });
+}
+
+function toggleHistoryMenu() {
+  const isHidden = historyMenu.classList.contains("hidden");
+  if (isHidden) {
+    openHistoryMenu();
+    return;
+  }
+
+  closeHistoryMenu();
+}
+
+function openHistoryMenu() {
+  renderUrlHistory();
+  historyMenu.classList.remove("hidden");
+  historyButton.classList.add("is-open");
+  historyButton.setAttribute("aria-expanded", "true");
+}
+
+function closeHistoryMenu() {
+  historyMenu.classList.add("hidden");
+  historyButton.classList.remove("is-open");
+  historyButton.setAttribute("aria-expanded", "false");
+}
 
 function normalizeUrl(value) {
   const completed = /^https?:\/\//i.test(value) ? value : `https://${value}`;
@@ -202,6 +364,8 @@ function renderResult(result) {
   resultBody.textContent = result.body || "-";
   resultPrompt.value = buildRewritePrompt(result);
   resetCopyButton();
+  resetAllImagesButton();
+  syncMediaLinks(result);
 
   resultTags.innerHTML = "";
   const safeTags = Array.isArray(result.tags) ? result.tags : [];
@@ -210,6 +374,116 @@ function renderResult(result) {
     tag.className = "tag";
     tag.textContent = `#${tagText}`;
     resultTags.appendChild(tag);
+  });
+}
+
+function syncMediaLinks(result) {
+  const links = collectMediaLinks(result);
+  mediaLinkState.images = links.images;
+  mediaLinkState.videos = links.videos;
+
+  if (mediaLinkState.activeTab === "videos" && !mediaLinkState.videos.length && mediaLinkState.images.length) {
+    mediaLinkState.activeTab = "images";
+  }
+
+  renderMediaTabs();
+  renderImageLinks(getActiveMediaUrls());
+}
+
+function collectMediaLinks(result) {
+  const rawImages = Array.isArray(result?.images) ? result.images : carouselState.images;
+  const rawVideos = Array.isArray(result?.videos)
+    ? result.videos
+    : [result?.video].filter(Boolean);
+
+  const images = dedupeMediaUrls(
+    rawImages
+      .map((url) => toSourceImageUrl(url))
+      .filter(Boolean)
+      .filter((url) => !isVideoUrl(url))
+  );
+
+  const videos = dedupeMediaUrls(
+    rawVideos
+      .map((url) => toSourceImageUrl(url))
+      .filter(Boolean)
+      .filter((url) => isVideoUrl(url))
+  );
+
+  return { images, videos };
+}
+
+function dedupeMediaUrls(urls) {
+  return [...new Set(urls)];
+}
+
+function switchMediaTab(tabName) {
+  mediaLinkState.activeTab = tabName;
+  renderMediaTabs();
+  renderImageLinks(getActiveMediaUrls());
+  resetAllImagesButton();
+}
+
+function renderMediaTabs() {
+  const isImages = mediaLinkState.activeTab === "images";
+  tabImages.classList.toggle("is-active", isImages);
+  tabVideos.classList.toggle("is-active", !isImages);
+}
+
+function getActiveMediaUrls() {
+  return mediaLinkState.activeTab === "videos" ? mediaLinkState.videos : mediaLinkState.images;
+}
+
+function getExportableMediaUrls() {
+  return getActiveMediaUrls().slice(0, MAX_REFERENCE_MEDIA);
+}
+
+function renderImageLinks(urls) {
+  resultImageLinks.innerHTML = "";
+
+  const safeUrls = Array.isArray(urls) ? urls : [];
+  if (!safeUrls.length) {
+    const empty = document.createElement("p");
+    empty.textContent = mediaLinkState.activeTab === "videos" ? "暂无视频链接" : "暂无图片链接";
+    resultImageLinks.appendChild(empty);
+    return;
+  }
+
+  safeUrls.forEach((mediaUrl, index) => {
+    const item = document.createElement("div");
+    item.className = "image-link-item";
+
+    const label = document.createElement("span");
+    label.className = "image-link-index";
+    label.textContent = `${mediaLinkState.activeTab === "videos" ? "视频" : "图片"} ${index + 1}`;
+
+    const input = document.createElement("input");
+    input.className = "image-link-input";
+    input.type = "text";
+    input.readOnly = true;
+    input.value = mediaUrl;
+
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "image-link-copy";
+    button.textContent = "复制";
+    button.addEventListener("click", async () => {
+      try {
+        await copyText(mediaUrl);
+        button.textContent = "已复制";
+        window.setTimeout(() => {
+          button.textContent = "复制";
+        }, 1200);
+      } catch (error) {
+        button.textContent = "失败";
+        window.setTimeout(() => {
+          button.textContent = "复制";
+        }, 1200);
+      }
+    });
+
+    item.append(label, input, button);
+    resultImageLinks.appendChild(item);
   });
 }
 
@@ -532,6 +806,20 @@ function resetCopyButton() {
   copyPromptButton.classList.remove("is-copied");
 }
 
+function flashAllImagesButton(label) {
+  copyAllImagesButton.textContent = label;
+  copyAllImagesButton.classList.toggle("is-copied", label === "已复制");
+  window.clearTimeout(copyAllImagesResetTimer);
+  copyAllImagesResetTimer = window.setTimeout(() => {
+    resetAllImagesButton();
+  }, 1500);
+}
+
+function resetAllImagesButton() {
+  copyAllImagesButton.textContent = "复制 JSON";
+  copyAllImagesButton.classList.remove("is-copied");
+}
+
 function normalizeImages(result) {
   const images = Array.isArray(result.images) ? result.images : [];
   const primaryImage = typeof result.image === "string" ? result.image : "";
@@ -640,6 +928,83 @@ function noteUrlToLabel(noteUrl) {
   } catch (error) {
     return noteUrl || "原始链接内容";
   }
+}
+
+function toSourceImageUrl(imageUrl) {
+  try {
+    const parsed = new URL(imageUrl, window.location.origin);
+    let sourceUrl = parsed;
+
+    if (parsed.pathname === "/api/image") {
+      const rawUrl = parsed.searchParams.get("url");
+      if (rawUrl) {
+        sourceUrl = new URL(decodeURIComponent(rawUrl));
+      }
+    }
+
+    return toDownloadableMediaUrl(sourceUrl);
+  } catch (error) {
+    return imageUrl;
+  }
+}
+
+function isVideoUrl(url) {
+  return /\.(mp4|mov|m4v|webm|m3u8)(\?|#|$)/i.test(url);
+}
+
+function toDownloadableMediaUrl(sourceUrl) {
+  const cleanUrl = new URL(sourceUrl.toString());
+  const pathname = cleanUrl.pathname;
+  const explicitExt = getMediaExtensionFromPath(pathname);
+  const inferredExt = explicitExt || inferMediaExtension(cleanUrl);
+
+  for (const key of [...cleanUrl.searchParams.keys()]) {
+    if (/^(w|h|width|height|quality|q|format|fit|resize|imageview2|x-oss-process|fm|fmt|ext)$/i.test(key)) {
+      cleanUrl.searchParams.delete(key);
+    }
+  }
+
+  if (explicitExt) {
+    cleanUrl.hash = "";
+    return `${cleanUrl.origin}${cleanUrl.pathname}`;
+  }
+
+  if (inferredExt) {
+    cleanUrl.hash = "";
+    return `${cleanUrl.origin}${cleanUrl.pathname}.${inferredExt}`;
+  }
+
+  return `${cleanUrl.origin}${cleanUrl.pathname}`;
+}
+
+function getMediaExtensionFromPath(pathname) {
+  const match = pathname.match(/\.(jpg|jpeg|png|webp|gif|bmp|svg|avif|heic|mp4|mov|m4v|webm|m3u8)$/i);
+  return match ? match[1].toLowerCase() : "";
+}
+
+function inferMediaExtension(url) {
+  const directFormat =
+    url.searchParams.get("format") ||
+    url.searchParams.get("fm") ||
+    url.searchParams.get("fmt") ||
+    url.searchParams.get("ext");
+
+  if (directFormat && /^(jpg|jpeg|png|webp|gif|bmp|svg|avif|heic|mp4|mov|m4v|webm|m3u8)$/i.test(directFormat)) {
+    return directFormat.toLowerCase();
+  }
+
+  const processValue = url.searchParams.get("x-oss-process") || "";
+  const processMatch = processValue.match(/format,([a-z0-9]+)/i);
+  if (processMatch) {
+    return processMatch[1].toLowerCase();
+  }
+
+  const imageViewMatch = url.toString().match(/\/format\/([a-z0-9]+)(?:\/|$)/i);
+  if (imageViewMatch) {
+    return imageViewMatch[1].toLowerCase();
+  }
+
+  return "";
 }
 
 function buildImageDedupKey(imageUrl) {
