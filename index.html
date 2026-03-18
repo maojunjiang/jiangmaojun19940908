@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>笔记解析器</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./styles.css?v=20260318-4" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="hero">
+        <div class="hero-copy">
+          <p class="eyebrow">Note Parser</p>
+          <h1>一条链接，拆出笔记核心内容</h1>
+          <p class="hero-text">
+            输入笔记链接，自动整理出图片、标题、正文和标签，方便你做二次归档、分析或内容搬运。
+          </p>
+        </div>
+        <div class="hero-card">
+          <div class="signal-row">
+            <span></span>
+            <span></span>
+            <span></span>
+          </div>
+          <p>支持最佳努力解析</p>
+          <strong>图片 / 标题 / 正文 / 标签</strong>
+        </div>
+      </header>
+
+      <main class="layout">
+        <section class="panel input-panel">
+          <div class="panel-heading">
+            <h2>输入链接</h2>
+            <p>可粘贴任意公开笔记链接。</p>
+          </div>
+
+          <form id="parse-form" class="parse-form">
+            <label class="field-label" for="note-url">笔记链接</label>
+            <div class="input-row">
+              <input
+                id="note-url"
+                name="note-url"
+                type="url"
+                placeholder="https://example.com/note/123"
+                autocomplete="off"
+                required
+              />
+              <button type="submit" id="submit-button">开始解析</button>
+            </div>
+          </form>
+
+          <div class="helper-grid">
+            <article class="helper-card">
+              <span class="helper-index">01</span>
+              <h3>自动提取</h3>
+              <p>抓取页面内容后，优先识别标题、首图、正文和话题标签。</p>
+            </article>
+            <article class="helper-card">
+              <span class="helper-index">02</span>
+              <h3>失败可定位</h3>
+              <p>如果目标网站限制抓取，会显示原因，便于你后续接后端代理。</p>
+            </article>
+          </div>
+
+          <div id="status-card" class="status-card idle">
+            <strong>等待输入</strong>
+            <p>输入一条笔记链接后开始解析。</p>
+          </div>
+        </section>
+
+        <section class="panel result-panel">
+          <div class="panel-heading">
+            <h2>解析结果</h2>
+            <p>当前展示首张图片与提取到的结构化字段。</p>
+          </div>
+
+          <div id="empty-state" class="empty-state">
+            <div class="empty-orb"></div>
+            <h3>结果会显示在这里</h3>
+            <p>支持从链接中自动推断图片、标题、正文、标签。</p>
+          </div>
+
+          <article id="result-card" class="result-card hidden" aria-live="polite">
+            <div class="result-media">
+              <div class="carousel-stage">
+                <img
+                  id="result-image"
+                  alt="解析出的笔记图片"
+                  src=""
+                />
+                <div id="carousel-overlay" class="carousel-overlay hidden">
+                  <button
+                    type="button"
+                    id="carousel-prev"
+                    class="carousel-nav"
+                    aria-label="上一张图片"
+                  >
+                    <svg aria-hidden="true" viewBox="0 0 24 24">
+                      <path d="M14.5 5.5 8 12l6.5 6.5" />
+                    </svg>
+                  </button>
+                  <div id="carousel-counter" class="carousel-counter">1 / 1</div>
+                  <button
+                    type="button"
+                    id="carousel-next"
+                    class="carousel-nav"
+                    aria-label="下一张图片"
+                  >
+                    <svg aria-hidden="true" viewBox="0 0 24 24">
+                      <path d="M9.5 5.5 16 12l-6.5 6.5" />
+                    </svg>
+                  </button>
+                </div>
+              </div>
+              <div id="carousel-dots" class="carousel-dots hidden" aria-label="图片预览列表"></div>
+            </div>
+
+            <div class="result-content">
+              <div class="result-block result-block-title">
+                <span class="result-label">标题</span>
+                <h3 id="result-title" class="result-content-scroll">-</h3>
+              </div>
+
+              <div class="result-block result-block-body">
+                <span class="result-label">正文</span>
+                <p id="result-body" class="result-content-scroll">-</p>
+              </div>
+
+              <div class="result-block result-block-tags">
+                <span class="result-label">标签</span>
+                <div id="result-tags" class="tag-list result-content-scroll"></div>
+              </div>
+            </div>
+          </article>
+        </section>
+      </main>
+    </div>
+
+    <script src="./script.js?v=20260318-4"></script>
+  </body>
+</html>
