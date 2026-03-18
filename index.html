@@ -19,7 +19,7 @@
           <p class="eyebrow">Note Parser</p>
           <h1>一条链接，拆出笔记核心内容</h1>
           <p class="hero-text">
-            输入笔记链接，自动整理出图片、标题、正文和标签，方便你做二次归档、分析或内容搬运。
+            输入笔记链接，自动整理出图片、标题、正文和标签，方便你做二次归档、分析或内容仿写。
           </p>
         </div>
         <div class="hero-card">
@@ -28,8 +28,8 @@
             <span></span>
             <span></span>
           </div>
-          <p>支持最佳努力解析</p>
-          <strong>图片 / 标题 / 正文 / 标签</strong>
+          <p>支持尽力解析</p>
+          <strong>图片 / 标题 / 正文 / 标签 / 仿写提示词</strong>
         </div>
       </header>
 
@@ -83,17 +83,13 @@
           <div id="empty-state" class="empty-state">
             <div class="empty-orb"></div>
             <h3>结果会显示在这里</h3>
-            <p>支持从链接中自动推断图片、标题、正文、标签。</p>
+            <p>支持从链接中自动提取图片、标题、正文、标签和仿写提示词。</p>
           </div>
 
           <article id="result-card" class="result-card hidden" aria-live="polite">
             <div class="result-media">
               <div class="carousel-stage">
-                <img
-                  id="result-image"
-                  alt="解析出的笔记图片"
-                  src=""
-                />
+                <img id="result-image" alt="解析出的笔记图片" src="" />
                 <div id="carousel-overlay" class="carousel-overlay hidden">
                   <button
                     type="button"
@@ -135,6 +131,20 @@
               <div class="result-block result-block-tags">
                 <span class="result-label">标签</span>
                 <div id="result-tags" class="tag-list result-content-scroll"></div>
+              </div>
+
+              <div class="result-block result-block-prompt">
+                <div class="result-block-head">
+                  <span class="result-label">仿写提示词模板</span>
+                  <button type="button" id="copy-prompt-button" class="copy-button">
+                    一键复制
+                  </button>
+                </div>
+                <textarea
+                  id="result-prompt"
+                  class="prompt-editor result-content-scroll"
+                  spellcheck="false"
+                >-</textarea>
               </div>
             </div>
           </article>

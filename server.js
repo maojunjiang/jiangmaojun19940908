@@ -229,12 +229,13 @@ function extractStructuredContent(rawText, noteUrl) {
     FALLBACK_IMAGE;
 
   const tags = xhsNote?.tags?.length ? xhsNote.tags : extractTags(normalized, noteUrl, title, body);
+  const cleanBody = removeStandaloneTagsFromBody(body, tags);
 
   return {
     image,
     images: primaryImages.length ? primaryImages : [image],
     title,
-    body,
+    body: cleanBody,
     tags,
     meta: {
       usedFallback:
@@ -243,6 +244,63 @@ function extractStructuredContent(rawText, noteUrl) {
         body.startsWith("已从链接提取到部分信息"),
     },
   };
+}
+
+function removeTagsFromBody(body, tags) {
+  if (typeof body !== "string" || !body.trim()) {
+    return body;
+  }
+
+  let cleaned = body
+    .replace(/[＃#][^＃#\s]{1,40}[＃#]/gu, " ")
+    .replace(/[＃#][^\s，。！？；：,.!?]{1,40}/gu, " ");
+
+  const safeTags = Array.isArray(tags)
+    ? tags
+        .map((tag) => String(tag || "").trim())
+        .filter(Boolean)
+        .sort((a, b) => b.length - a.length)
+    : [];
+
+  for (const tag of safeTags) {
+    const escaped = escapeRegExp(tag);
+    cleaned = cleaned
+      .replace(new RegExp(`#\\s*${escaped}\\s*#`, "giu"), " ")
+      .replace(new RegExp(`#${escaped}(?=\\s|$|[.,!?;:，。！？；：])`, "giu"), " ")
+      .replace(new RegExp(`(?<=^|\\s|[，。！？；：,.!?])${escaped}(?=\\s|$|[，。！？；：,.!?])`, "giu"), " ");
+  }
+
+  return cleaned.replace(/\s+/g, " ").trim();
+}
+
+function removeStandaloneTagsFromBody(body, tags) {
+  if (typeof body !== "string" || !body.trim()) {
+    return body;
+  }
+
+  let cleaned = body
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter((line) => !/^[#\uFF03][^#\uFF03\s]{1,40}[#\uFF03]?$/u.test(line))
+    .join(" ")
+    .replace(/[#\uFF03][^#\uFF03\s]{1,40}[#\uFF03]/gu, " ")
+    .replace(/[#\uFF03][^\s,.!?;:，。！？；：]{1,40}/gu, " ");
+
+  const safeTags = Array.isArray(tags)
+    ? tags
+        .map((tag) => String(tag || "").trim())
+        .filter(Boolean)
+        .sort((a, b) => b.length - a.length)
+    : [];
+
+  for (const tag of safeTags) {
+    const escaped = escapeRegExp(tag);
+    cleaned = cleaned
+      .replace(new RegExp(`[#\\uFF03]\\s*${escaped}\\s*[#\\uFF03]`, "giu"), " ")
+      .replace(new RegExp(`[#\\uFF03]\\s*${escaped}(?=\\s|$|[.,!?;:，。！？；：])`, "giu"), " ");
+  }
+
+  return cleaned.replace(/\s+/g, " ").trim();
 }
 
 function extractPrimaryImages(source, noteUrl) {
@@ -259,7 +317,7 @@ function extractPrimaryImages(source, noteUrl) {
   addUniqueImages(candidates, extractJsonLdImages(source, noteUrl), noteUrl);
   addUniqueImages(candidates, extractInlineImages(source, noteUrl), noteUrl);
 
-  return candidates.slice(0, 24);
+  return dedupeAndRankImages(candidates).slice(0, 24);
 }
 
 function addUniqueImages(target, imageCandidates, baseUrl) {
@@ -277,6 +335,24 @@ function addUniqueImages(target, imageCandidates, baseUrl) {
       target.push(resolved);
     }
   }
+}
+
+function dedupeAndRankImages(images) {
+  const bestByKey = new Map();
+
+  for (const imageUrl of images) {
+    const key = buildImageDedupKey(imageUrl);
+    const candidate = { url: imageUrl, score: scoreImageCandidate(imageUrl, 0) + scoreImageResolution(imageUrl) };
+    const existing = bestByKey.get(key);
+
+    if (!existing || candidate.score > existing.score) {
+      bestByKey.set(key, candidate);
+    }
+  }
+
+  return [...bestByKey.values()]
+    .sort((a, b) => b.score - a.score)
+    .map((item) => item.url);
 }
 
 function extractMetaContent(source, attrName, attrValue) {
@@ -527,17 +603,18 @@ function extractXiaohongshuImagesFromImageList(imageList) {
 
   for (const item of imageList) {
     const itemCandidates = [
-      item?.urlDefault,
-      item?.urlPre,
       item?.originImageUrl,
+      item?.masterUrl,
+      item?.urlDefault,
       item?.imageUrl,
       item?.coverUrl,
-      item?.thumbnailUrl,
       item?.url,
       item?.urlOrigin,
-      item?.masterUrl,
+      item?.urlPre,
+      item?.thumbnailUrl,
     ]
       .map((value) => normalizeXiaohongshuImageUrl(value))
+      .filter((value) => !isThumbnailLikeImageUrl(value))
       .filter(Boolean);
 
     for (const candidate of itemCandidates) {
@@ -950,6 +1027,17 @@ function normalizeXiaohongshuImageUrl(value) {
   return decodeEscapedSlashes(value).replace(/^http:/, "https:").replace(/^\/\//, "https://");
 }
 
+function isThumbnailLikeImageUrl(value) {
+  if (typeof value !== "string" || !value) {
+    return false;
+  }
+
+  const lower = value.toLowerCase();
+  return /(thumbnail|thumb|small|mini|urlpre|imageview2\/2\/w\/|\/w\/(?:120|160|240|320|480)(?:\/|$)|[?&](?:imageview2|w|width)=(?:120|160|240|320|480)(?:&|$))/i.test(
+    lower
+  );
+}
+
 function isXiaohongshuImageUrl(value) {
   return /(sns-webpic|xhscdn\.com|qpic\.cn|xiaohongshu\.com\/fe_api)/i.test(value);
 }
@@ -957,6 +1045,10 @@ function isXiaohongshuImageUrl(value) {
 function addImageCandidate(target, rawCandidate, baseUrl, baseScore) {
   const resolved = resolveUrl(rawCandidate, baseUrl);
   if (!resolved) {
+    return;
+  }
+
+  if (isThumbnailLikeImageUrl(resolved)) {
     return;
   }
 
@@ -1012,6 +1104,75 @@ function scoreImageCandidate(url, baseScore) {
   return score;
 }
 
+function scoreImageResolution(url) {
+  let score = 0;
+  const lower = url.toLowerCase();
+
+  if (/(origin|master|raw|full|large)/i.test(lower)) {
+    score += 18;
+  }
+
+  if (/(urlpre|thumbnail|thumb|small|mini)/i.test(lower)) {
+    score -= 16;
+  }
+
+  const width = extractLargestDimensionHint(lower);
+  if (width >= 1200) {
+    score += 14;
+  } else if (width >= 800) {
+    score += 8;
+  } else if (width > 0 && width <= 480) {
+    score -= 10;
+  }
+
+  return score;
+}
+
+function extractLargestDimensionHint(value) {
+  const patterns = [/\/w\/(\d{2,5})/gi, /(?:^|[?&/_-])(w|width|dw|sw|x-oss-process=[^&]*w_)(\d{2,5})/gi];
+  let max = 0;
+
+  for (const pattern of patterns) {
+    for (const match of value.matchAll(pattern)) {
+      const maybe = Number(match.at(-1));
+      if (Number.isFinite(maybe)) {
+        max = Math.max(max, maybe);
+      }
+    }
+  }
+
+  return max;
+}
+
+function buildImageDedupKey(imageUrl) {
+  try {
+    const parsed = new URL(imageUrl);
+    const host = parsed.hostname.toLowerCase();
+    const pathname = normalizeImagePath(parsed.pathname);
+
+    if (/(xhscdn\.com|sns-webpic|qpic\.cn)/i.test(host)) {
+      return `${host}${pathname}`;
+    }
+
+    for (const key of [...parsed.searchParams.keys()]) {
+      if (/^(w|h|width|height|quality|q|format|fit|resize|imageview2|x-oss-process)$/i.test(key)) {
+        parsed.searchParams.delete(key);
+      }
+    }
+
+    return `${host}${pathname}?${parsed.searchParams.toString()}`;
+  } catch (error) {
+    return imageUrl;
+  }
+}
+
+function normalizeImagePath(pathname) {
+  return pathname
+    .replace(/!\w[\w-]*/g, "")
+    .replace(/\/(thumbnail|thumb|small|mini|origin|master)\//gi, "/")
+    .replace(/\/{2,}/g, "/");
+}
+
 function getAttribute(tag, attributeName) {
   const pattern = new RegExp(`${escapeRegExp(attributeName)}=["']([^"']+)["']`, "i");
   const match = tag.match(pattern);
@@ -1061,14 +1222,33 @@ function isXiaohongshuUrl(value) {
 
 function buildClientResult(result) {
   const images = Array.isArray(result.images) ? result.images : [];
-  const proxiedImages = [...new Set(images.map((imageUrl) => buildImageProxyUrl(imageUrl)).filter(Boolean))];
-  const primaryImage = proxiedImages[0] || buildImageProxyUrl(result.image) || FALLBACK_IMAGE;
+  const uniqueImages = dedupeImageUrls(images);
+  const proxiedImages = uniqueImages.map((imageUrl) => buildImageProxyUrl(imageUrl)).filter(Boolean);
+  const primarySourceImage = uniqueImages[0] || result.image;
+  const primaryImage = buildImageProxyUrl(primarySourceImage) || FALLBACK_IMAGE;
 
   return {
     ...result,
     image: primaryImage,
     images: proxiedImages.length ? proxiedImages : [primaryImage],
   };
+}
+
+function dedupeImageUrls(images) {
+  const uniqueMap = new Map();
+
+  for (const imageUrl of images) {
+    if (!imageUrl) {
+      continue;
+    }
+
+    const key = buildImageDedupKey(imageUrl);
+    if (!uniqueMap.has(key)) {
+      uniqueMap.set(key, imageUrl);
+    }
+  }
+
+  return [...uniqueMap.values()];
 }
 
 function buildImageProxyUrl(imageUrl) {
