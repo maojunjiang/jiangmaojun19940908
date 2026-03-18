@@ -69,122 +69,134 @@
 
         </section>
 
-        <div class="right-column">
-          <section class="panel tools-panel">
-            <div class="panel-heading">
-              <h2>解析工具</h2>
-              <p>把解析 URL 和仿写提示词放在同一个模块里，方便对照处理与复制。</p>
+        <section class="panel tools-panel">
+          <div class="panel-heading">
+            <h2>解析工具</h2>
+            <p>把解析 URL 和仿写提示词放在同一个模块里，方便对照处理与复制。</p>
+          </div>
+
+          <div class="panel-body tools-grid">
+            <div class="result-block result-block-links tools-block">
+              <div class="result-block-head">
+                <div>
+                  <span class="result-label">解析 URL</span>
+                  <div class="media-link-tabs" role="tablist" aria-label="媒体链接类型">
+                    <button
+                      type="button"
+                      id="tab-images"
+                      class="media-link-tab is-active"
+                      data-media-tab="images"
+                    >
+                      图片链接
+                    </button>
+                    <button
+                      type="button"
+                      id="tab-videos"
+                      class="media-link-tab"
+                      data-media-tab="videos"
+                    >
+                      视频链接
+                    </button>
+                  </div>
+                </div>
+                <button type="button" id="copy-all-images-button" class="copy-button">
+                  复制 JSON
+                </button>
+              </div>
+              <div id="result-image-links" class="image-link-list result-content-scroll"></div>
             </div>
 
-            <div class="panel-body tools-grid">
-              <div class="result-block result-block-links tools-block">
-                <div class="result-block-head">
-                  <div>
-                    <span class="result-label">解析 URL</span>
-                    <div class="media-link-tabs" role="tablist" aria-label="媒体链接类型">
-                      <button
-                        type="button"
-                        id="tab-images"
-                        class="media-link-tab is-active"
-                        data-media-tab="images"
-                      >
-                        图片链接
-                      </button>
-                      <button
-                        type="button"
-                        id="tab-videos"
-                        class="media-link-tab"
-                        data-media-tab="videos"
-                      >
-                        视频链接
-                      </button>
-                    </div>
-                  </div>
-                  <button type="button" id="copy-all-images-button" class="copy-button">
-                    复制 JSON
-                  </button>
-                </div>
-                <div id="result-image-links" class="image-link-list result-content-scroll"></div>
+            <div class="result-block result-block-prompt tools-block">
+              <div class="result-block-head">
+                <span class="result-label">仿写提示词</span>
+                <button type="button" id="copy-prompt-button" class="copy-button">
+                  一键复制
+                </button>
               </div>
+              <textarea
+                id="result-prompt"
+                class="prompt-editor result-content-scroll"
+                spellcheck="false"
+              >-</textarea>
+            </div>
 
-              <div class="result-block result-block-prompt tools-block">
+              <div class="result-block result-block-image-prompt tools-block tools-block-wide">
                 <div class="result-block-head">
-                  <span class="result-label">仿写提示词</span>
-                  <button type="button" id="copy-prompt-button" class="copy-button">
+                  <span class="result-label">图片复刻 Prompt</span>
+                  <button type="button" id="copy-image-prompt-button" class="copy-button">
                     一键复制
                   </button>
-                </div>
-                <textarea
-                  id="result-prompt"
-                  class="prompt-editor result-content-scroll"
-                  spellcheck="false"
-                >-</textarea>
               </div>
+              <textarea
+                id="result-image-prompt"
+                class="prompt-editor result-content-scroll"
+                spellcheck="false"
+              >-</textarea>
             </div>
-          </section>
+          </div>
+        </section>
 
-          <section class="panel result-panel">
-            <div class="panel-heading">
-              <h2>解析结果</h2>
-              <p>展示图片、标题、正文和标签。</p>
-            </div>
+        <section class="panel result-panel">
+          <div class="panel-heading">
+            <h2>解析结果</h2>
+            <p>展示图片、标题、正文和标签。</p>
+          </div>
 
-            <div id="empty-state" class="empty-state">
-              <div class="empty-orb"></div>
-              <h3>结果会显示在这里</h3>
-              <p>解析成功后，这里会展示图片、标题、正文和标签。</p>
-            </div>
+          <div id="empty-state" class="empty-state">
+            <div class="empty-orb"></div>
+            <h3>结果会显示在这里</h3>
+            <p>解析成功后，这里会展示图片、标题、正文和标签。</p>
+          </div>
 
-            <article id="result-card" class="result-card hidden" aria-live="polite">
-              <div class="result-media">
-                <div class="carousel-stage">
-                  <img id="result-image" alt="解析出的笔记图片" src="" />
-                  <div id="carousel-overlay" class="carousel-overlay hidden">
-                    <button
-                      type="button"
-                      id="carousel-prev"
-                      class="carousel-nav"
-                      aria-label="上一张图片"
-                    >
-                      <svg aria-hidden="true" viewBox="0 0 24 24">
-                        <path d="M14.5 5.5 8 12l6.5 6.5" />
-                      </svg>
-                    </button>
-                    <div id="carousel-counter" class="carousel-counter">1 / 1</div>
-                    <button
-                      type="button"
-                      id="carousel-next"
-                      class="carousel-nav"
-                      aria-label="下一张图片"
-                    >
-                      <svg aria-hidden="true" viewBox="0 0 24 24">
-                        <path d="M9.5 5.5 16 12l-6.5 6.5" />
-                      </svg>
-                    </button>
-                  </div>
-                </div>
-                <div id="carousel-dots" class="carousel-dots hidden" aria-label="图片预览列表"></div>
-              </div>
-
-              <div class="result-content">
-                <div class="result-block result-block-title">
-                  <span class="result-label">标题</span>
-                  <h3 id="result-title" class="result-content-scroll">-</h3>
-                </div>
-
-                <div class="result-block result-block-body">
-                  <span class="result-label">正文</span>
-                  <p id="result-body" class="result-content-scroll">-</p>
-                </div>
-
-                <div class="result-block result-block-tags">
-                  <span class="result-label">标签</span>
-                  <div id="result-tags" class="tag-list result-content-scroll"></div>
+          <article id="result-card" class="result-card hidden" aria-live="polite">
+            <div class="result-media">
+              <div class="carousel-stage">
+                <img id="result-image" alt="解析出的笔记图片" src="" />
+                <div id="carousel-overlay" class="carousel-overlay hidden">
+                  <button
+                    type="button"
+                    id="carousel-prev"
+                    class="carousel-nav"
+                    aria-label="上一张图片"
+                  >
+                    <svg aria-hidden="true" viewBox="0 0 24 24">
+                      <path d="M14.5 5.5 8 12l6.5 6.5" />
+                    </svg>
+                  </button>
+                  <div id="carousel-counter" class="carousel-counter">1 / 1</div>
+                  <button
+                    type="button"
+                    id="carousel-next"
+                    class="carousel-nav"
+                    aria-label="下一张图片"
+                  >
+                    <svg aria-hidden="true" viewBox="0 0 24 24">
+                      <path d="M9.5 5.5 16 12l-6.5 6.5" />
+                    </svg>
+                  </button>
                 </div>
               </div>
-            </article>
-          </section>
-        </div>
+              <div id="carousel-dots" class="carousel-dots hidden" aria-label="图片预览列表"></div>
+            </div>
+
+            <div class="result-content">
+              <div class="result-block result-block-title">
+                <span class="result-label">标题</span>
+                <h3 id="result-title" class="result-content-scroll">-</h3>
+              </div>
+
+              <div class="result-block result-block-body">
+                <span class="result-label">正文</span>
+                <p id="result-body" class="result-content-scroll">-</p>
+              </div>
+
+              <div class="result-block result-block-tags">
+                <span class="result-label">标签</span>
+                <div id="result-tags" class="tag-list result-content-scroll"></div>
+              </div>
+            </div>
+          </article>
+        </section>
       </main>
     </div>
 

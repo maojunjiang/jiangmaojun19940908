@@ -142,13 +142,7 @@ img {
   display: grid;
   grid-template-columns: minmax(320px, 390px) minmax(0, 1fr);
   gap: 20px;
-  align-items: start;
-}
-
-.right-column {
-  display: grid;
-  gap: 20px;
-  align-self: start;
+  align-items: stretch;
 }
 
 .side-panels {
@@ -437,14 +431,23 @@ img {
 
 .result-panel {
   min-height: 640px;
+  grid-column: 1 / -1;
 }
 
 .tools-panel {
   min-height: 0;
 }
 
+.input-panel,
+.tools-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
 .panel-body {
   min-height: 0;
+  flex: 1;
 }
 
 .tools-grid {
@@ -452,6 +455,10 @@ img {
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 18px;
   align-items: start;
+}
+
+.tools-block-wide {
+  grid-column: 1 / -1;
 }
 
 .empty-state {
@@ -711,6 +718,10 @@ img {
   height: 320px;
 }
 
+.result-block-image-prompt {
+  height: 286px;
+}
+
 .tools-block {
   min-height: 0;
   max-height: none;
@@ -723,6 +734,16 @@ img {
   justify-content: space-between;
   gap: 12px;
   flex-wrap: wrap;
+}
+
+.result-block-links .result-block-head {
+  align-items: flex-end;
+}
+
+.result-block-links .result-block-head > div:first-child {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
 }
 
 .result-block-head .result-label {

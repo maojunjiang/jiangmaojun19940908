@@ -20,6 +20,8 @@ const tabVideos = document.querySelector("#tab-videos");
 const copyAllImagesButton = document.querySelector("#copy-all-images-button");
 const resultPrompt = document.querySelector("#result-prompt");
 const copyPromptButton = document.querySelector("#copy-prompt-button");
+const resultImagePrompt = document.querySelector("#result-image-prompt");
+const copyImagePromptButton = document.querySelector("#copy-image-prompt-button");
 
 const FALLBACK_IMAGE =
   "https://images.unsplash.com/photo-1517841905240-472988babdf9?auto=format&fit=crop&w=1200&q=80";
@@ -42,6 +44,7 @@ const swipeState = {
 
 let copyPromptResetTimer = 0;
 let copyAllImagesResetTimer = 0;
+let copyImagePromptResetTimer = 0;
 let urlHistory = loadUrlHistory();
 const mediaLinkState = {
   activeTab: "images",
@@ -122,6 +125,21 @@ copyPromptButton.addEventListener("click", async () => {
     flashCopyButton("已复制");
   } catch (error) {
     flashCopyButton("复制失败");
+  }
+});
+
+copyImagePromptButton.addEventListener("click", async () => {
+  const promptText = resultImagePrompt.value.trim();
+  if (!promptText || promptText === "-") {
+    flashImagePromptButton("暂无内容");
+    return;
+  }
+
+  try {
+    await copyText(promptText);
+    flashImagePromptButton("已复制");
+  } catch (error) {
+    flashImagePromptButton("复制失败");
   }
 });
 
@@ -367,7 +385,9 @@ function renderResult(result) {
   resultTitle.textContent = result.title || "-";
   resultBody.textContent = result.body || "-";
   resultPrompt.value = buildRewritePrompt(result);
+  resultImagePrompt.value = buildImageGenerationPrompt(result);
   resetCopyButton();
+  resetImagePromptButton();
   resetAllImagesButton();
   syncMediaLinks(result);
 
@@ -527,6 +547,80 @@ function buildRewritePrompt(result) {
     "正文：",
     "标签：",
   ].join("\n");
+}
+
+function buildImageGenerationPrompt(result) {
+  const profile = analyzeNoteProfile(result);
+  const styleHint = inferImageStyleHint(result, profile);
+  const compositionHint = inferImageCompositionHint(result, profile);
+  const colorHint = inferImageColorHint(result, profile);
+  const layoutHint = inferImageLayoutHint(result, profile);
+  const mediumHint = inferImageMediumHint(result, profile);
+  const lightingHint = inferImageLightingHint(result, profile);
+  const materialHint = inferImageMaterialHint(result, profile);
+  const qualityHint = inferImageQualityHint(result, profile);
+  const atmosphereHint = inferImageAtmosphereHint(result, profile);
+  const tagsText = formatPromptTags(result.tags);
+  const imageCount = collectImageReferenceUrls(result).length;
+  const imageSections = imageCount
+    ? Array.from({ length: imageCount }, (_, index) =>
+          [
+            `图片 ${index + 1}：`,
+            `请先准确分析这张图的主体、场景、镜头、构图、景别、视角、光线、用色、材质、版式感、氛围、媒介属性，然后单独输出这一张图的复刻 prompt。`,
+            `要求这张图的生成质量对齐原图，保留相同的视觉特征和完成度，优先做到“像同一张图”，而不是仅仅“风格相似”。`,
+            "输出字段：",
+            `- 视觉拆解：主体与场景 / 构图与镜头 / 光线与用色 / 材质与质感 / 版式与层次 / 媒介属性 / 质量标准`,
+            `- 复刻 prompt：写成一整段可直接喂给文生图模型的中文描述`,
+            `- 负面提示：列出这张图在复刻时必须避免的问题`
+          ].join("\n")
+        )
+        .join("\n\n")
+    : "图片 1：请在此处粘贴需要复刻的图片，然后按要求输出视觉拆解与复刻 prompt。";
+
+  return [
+    "你是一名专业视觉设计总监兼 AI 视觉复刻提示词专家。",
+    "请对以下每一张图片分别进行专业视觉拆解，并为每一张图单独生成可直接用于文生图模型的复刻 prompt。",
+    "",
+    "总要求：",
+    "1. 每张图都要单独分析、单独输出，不要合并成一个泛化模板。",
+    "2. 目标不是做“相似风格图”，而是尽量复刻出和原图一致的视觉特征、完成度和画面质量。",
+    "3. 从专业角度分析每张图的主体、场景、构图、景别、镜头视角、画风、光线、用色、材质、版式、氛围、媒介属性，必要时判断是实拍、棚拍、静物、海报、渲染还是插画。",
+    "4. 生成的 prompt 要足够具体，能让其他 AI 尽量还原原图，而不是只给抽象关键词。",
+    "5. 不要写“参考这张图”“结合上下文”这种依赖额外说明的话，结果要能直接复制给其他 AI 使用。",
+    "6. 如果图片中有多人物、多主体、多层背景、文字排版、道具细节、空间透视、色彩重点，都要明确写进 prompt。",
+    "",
+    "整组图片的辅助判断：",
+    `- 内容主题：${profile.topicPosition}`,
+    `- 主体类型：${profile.subjectFocus}`,
+    `- 常见画风倾向：${styleHint}`,
+    `- 常见构图倾向：${compositionHint}`,
+    `- 常见用色倾向：${colorHint}`,
+    `- 常见光线倾向：${lightingHint}`,
+    `- 常见材质倾向：${materialHint}`,
+    `- 常见版式倾向：${layoutHint}`,
+    `- 常见媒介判断：${mediumHint}`,
+    `- 常见氛围判断：${atmosphereHint}`,
+    `- 质量对齐要求：${qualityHint}`,
+    `- 辅助关键词：${tagsText}`,
+    "",
+    "请按以下格式输出：",
+    "图片 1",
+    "视觉拆解：",
+    "复刻 prompt：",
+    "负面提示：",
+    "",
+    "图片 2",
+    "视觉拆解：",
+    "复刻 prompt：",
+    "负面提示：",
+    "",
+    imageSections
+  ].join("\n");
+}
+
+function collectImageReferenceUrls(result) {
+  const rawImages = Array.isArray(result?.images) ? result.images : [];
+  return dedupeMediaUrls(rawImages.map((url) => toSourceImageUrl(url)).filter(Boolean).filter((url) => !isVideoUrl(url)));
 }
 
 function analyzeNoteProfile(result) {
@@ -692,6 +786,187 @@ function inferToneHint(result) {
   return "真诚自然，像本人分享体验，不夸张不生硬";
 }
 
+function inferImageStyleHint(result, profile) {
+  const combined = buildAnalysisText(result);
+
+  if (/(职场|面试|办公室|简历|上班|通勤)/.test(combined)) {
+    return "真实职场感的人像或场景图，偏自然纪实，干净明亮，像高质量生活方式内容配图";
+  }
+
+  if (/(教程|步骤|技巧|干货|攻略)/.test(combined)) {
+    return "信息感较强的生活方式视觉，画面清晰克制，重点明确，有轻微 editorial 感";
+  }
+
+  if (/(穿搭|妆容|护肤|单品)/.test(combined)) {
+    return "精致但不过度修饰的生活方式审美，保留真实皮肤和材质质感";
+  }
+
+  if (profile.categoryLabel === "经验分享") {
+    return "像小红书高质量经验帖配图，真实自然，生活感强，轻微氛围包装";
+  }
+
+  return "真实自然的生活方式摄影风格，保留内容感和可读性，不要过度艺术化";
+}
+
+function inferImageCompositionHint(result, profile) {
+  const combined = buildAnalysisText(result);
+  const imageCount = Array.isArray(result.images) ? result.images.length : 1;
+
+  if (/(人物|女生|男生|博主|朋友|主理人)/.test(combined)) {
+    return "以单主体为核心的中近景或半身构图，主体清晰，背景简洁，有明确视觉焦点";
+  }
+
+  if (/(产品|单品|物品|护肤品|彩妆|包包|鞋子)/.test(combined)) {
+    return "主体居中偏前景，搭配少量辅助道具，层次清楚，留出适度呼吸感";
+  }
+
+  if (imageCount >= 3) {
+    return "参考组图里常见的封面式取景，优先选择稳定、清楚、易读的主画面构图";
+  }
+
+  return `围绕${profile.subjectFocus}建立单一主视觉，保持主次分明、构图稳定、画面干净`;
+}
+
+function inferImageColorHint(result, profile) {
+  const combined = buildAnalysisText(result);
+
+  if (/(职场|面试|办公室|工位|电脑|会议室|通勤)/.test(combined)) {
+    return "偏中性、克制、干净的都市色系，可加入少量高亮重点色增强信息感";
+  }
+
+  if (/(咖啡|餐厅|探店|下午茶|门店|甜品|饮品)/.test(combined)) {
+    return "暖调生活方式色彩，低饱和主色配合局部食物或空间点缀色";
+  }
+
+  if (/(护肤|彩妆|产品|单品|穿搭)/.test(combined)) {
+    return "主色明确，背景色干净，主体颜色和材质被突出，整体偏审美向";
+  }
+
+  return `围绕“${profile.topicPosition}”形成统一而清楚的色彩组织，主次分明，不过度堆色`;
+}
+
+function inferImageLayoutHint(result, profile) {
+  const combined = buildAnalysisText(result);
+
+  if (/(教程|步骤|方法|攻略|清单|干货)/.test(combined)) {
+    return "信息组织清楚，画面像内容封面或信息型配图，视觉重点明确，适合承载标题感";
+  }
+
+  if (/(职场|经验分享|面试|工作)/.test(combined)) {
+    return "整体偏内容封面逻辑，主体与背景关系清楚，有明显视觉中心，适合社媒首图";
+  }
+
+  if (/(产品|单品|护肤|彩妆|穿搭)/.test(combined)) {
+    return "版面偏审美陈列式，主体摆位有节奏，留白和细节辅助共同建立高级感";
+  }
+
+  return `围绕${profile.subjectFocus}形成稳定的视觉层级，让主体、环境和辅助元素各自有清晰位置`;
+}
+
+function inferImageMediumHint(result, profile) {
+  const combined = buildAnalysisText(result);
+
+  if (/(渲染|3d|三维|建模|c4d|海报|kv|插画)/.test(combined)) {
+    return "更偏设计渲染或视觉合成方向，可用精修质感处理";
+  }
+
+  if (/(产品|单品|护肤|彩妆|包包|鞋子)/.test(combined)) {
+    return "大概率接近实拍静物或棚拍产品图，也可允许轻微广告级后期";
+  }
+
+  if (/(人物|职场|通勤|面试|生活|经验分享)/.test(combined)) {
+    return "更接近真实生活方式实拍摄影，可保留轻微 editorial 感，但主体应自然可信";
+  }
+
+  return `优先判断为与“${profile.topicPosition}”匹配的真实摄影或轻设计化视觉，不建议直接做重渲染风格`;
+}
+
+function inferImageLightingHint(result, profile) {
+  const combined = buildAnalysisText(result);
+
+  if (/(职场|办公室|通勤|人物|面试)/.test(combined)) {
+    return "自然光或柔和环境光为主，面部与主体轮廓清楚，避免过硬补光和影楼感";
+  }
+
+  if (/(产品|护肤|彩妆|单品)/.test(combined)) {
+    return "受控柔光，亮部干净，阴影克制，重点突出主体材质和轮廓";
+  }
+
+  if (/(餐厅|咖啡|探店|甜品|饮品)/.test(combined)) {
+    return "生活方式场景光，整体柔和，有局部高光和空间氛围，不要死白平光";
+  }
+
+  return `围绕${profile.subjectFocus}建立清楚、自然、可读的光线关系，亮部不过曝，暗部不糊成一片`;
+}
+
+function inferImageMaterialHint(result, profile) {
+  const combined = buildAnalysisText(result);
+
+  if (/(人物|女生|男生|博主|朋友)/.test(combined)) {
+    return "皮肤、发丝、服装面料与道具材质要真实可感，保留细节，不做塑料质感处理";
+  }
+
+  if (/(产品|护肤|彩妆|单品|包包|鞋子)/.test(combined)) {
+    return "重点呈现产品表面、边缘、反光、纹理和材质层次，让主体具备商业级质感";
+  }
+
+  if (/(甜品|饮品|美食|料理)/.test(combined)) {
+    return "食物纹理、液体透明感、器皿质地和桌面材质都要清楚，避免糊成一片";
+  }
+
+  return `突出${profile.subjectFocus}相关的真实材质与细节层次，让画面既清楚又有触感`;
+}
+
+function inferImageAtmosphereHint(result, profile) {
+  const combined = buildAnalysisText(result);
+
+  if (/(职场|面试|工作|上班)/.test(combined)) {
+    return "专业、克制、真实、有内容感，像成熟账号的高质量经验帖配图";
+  }
+
+  if (/(推荐|种草|爱用|回购)/.test(combined)) {
+    return "轻松自然、有审美感和分享欲，但不过度夸张，不要廉价营销感";
+  }
+
+  if (/(教程|步骤|攻略|方法)/.test(combined)) {
+    return "清晰利落、重点明确，像高完成度的信息型视觉";
+  }
+
+  return `保持${profile.topicPosition}对应的真实内容氛围，让画面既有传播感，也有可信度`;
+}
+
+function inferImageQualityHint(result, profile) {
+  const combined = buildAnalysisText(result);
+
+  if (/(人物|职场|生活|经验分享|通勤)/.test(combined)) {
+    return "达到高质量社交媒体实拍封面图水准，人物比例自然，细节完整，画面干净，像成熟博主真实拍摄成片";
+  }
+
+  if (/(产品|护肤|彩妆|单品)/.test(combined)) {
+    return "达到商业级产品图或品牌社媒图水准，边缘锐利，材质准确，构图稳定，精致但不假";
+  }
+
+  if (/(美食|甜品|饮品|探店)/.test(combined)) {
+    return "达到优质生活方式内容图水准，食物与环境都有真实质感，颜色诱人但不过饱和";
+  }
+
+  return `整体质量要对齐高质量${profile.topicPosition}内容图：主体明确、细节充分、观感成熟、真实自然`;
+}
+
+function inferPromptDirectionHint(result, profile) {
+  return [
+    `保留${profile.subjectFocus}的主体定位`,
+    `沿用${profile.topicPosition}对应的视觉语境`,
+    "复用风格、构图、用色、光线、材质和媒介属性的方法论，而不是复制原图细节",
+    "让不同帖子都能套用成同风格方向的高质量文生图模板"
+  ].join("；");
+}
+
+function formatPromptTags(tags) {
+  const safeTags = Array.isArray(tags) ? tags.map((tag) => String(tag || "").trim()).filter(Boolean) : [];
+  return safeTags.length ? safeTags.slice(0, 6).join("、") : "真实感、生活方式、内容感、自然构图";
+}
+
 function buildAnalysisText(result) {
   const title = String(result.title || "");
   const body = String(result.body || "");
@@ -817,6 +1092,20 @@ function flashCopyButton(label) {
 function resetCopyButton() {
   copyPromptButton.textContent = "一键复制";
   copyPromptButton.classList.remove("is-copied");
+}
+
+function flashImagePromptButton(label) {
+  copyImagePromptButton.textContent = label;
+  copyImagePromptButton.classList.toggle("is-copied", label === "已复制");
+  window.clearTimeout(copyImagePromptResetTimer);
+  copyImagePromptResetTimer = window.setTimeout(() => {
+    resetImagePromptButton();
+  }, 1500);
+}
+
+function resetImagePromptButton() {
+  copyImagePromptButton.textContent = "一键复制";
+  copyImagePromptButton.classList.remove("is-copied");
 }
 
 function flashAllImagesButton(label) {
