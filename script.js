@@ -3,7 +3,6 @@ const urlInput = document.querySelector("#note-url");
 const submitButton = document.querySelector("#submit-button");
 const historyButton = document.querySelector("#history-button");
 const historyMenu = document.querySelector("#history-menu");
-const statusCard = document.querySelector("#status-card");
 const emptyState = document.querySelector("#empty-state");
 const resultCard = document.querySelector("#result-card");
 const resultImage = document.querySelector("#result-image");
@@ -25,6 +24,7 @@ const copyPromptButton = document.querySelector("#copy-prompt-button");
 const FALLBACK_IMAGE =
   "https://images.unsplash.com/photo-1517841905240-472988babdf9?auto=format&fit=crop&w=1200&q=80";
 const MAX_REFERENCE_MEDIA = 14;
+const DEFAULT_SUBMIT_BUTTON_TEXT = "开始解析";
 const HISTORY_STORAGE_KEY = "note-parser:url-history";
 const HISTORY_LIMIT = 12;
 
@@ -51,13 +51,14 @@ const mediaLinkState = {
 
 warnIfOpenedFromFile();
 renderUrlHistory();
+setSubmitButtonState("idle");
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
 
   const rawUrl = urlInput.value.trim();
   if (!rawUrl) {
-    setStatus("error", "链接不能为空", "先输入一条笔记链接再开始解析。");
+    setSubmitButtonState("idle");
     return;
   }
 
@@ -66,12 +67,11 @@ form.addEventListener("submit", async (event) => {
   try {
     noteUrl = normalizeUrl(rawUrl);
   } catch (error) {
-    setStatus("error", "链接格式不正确", "请输入完整链接，例如 https://example.com/note/123");
+    setSubmitButtonState("idle");
     return;
   }
 
-  setStatus("loading", "正在解析", "正在抓取页面内容并整理结果，请稍等。");
-  submitButton.disabled = true;
+  setSubmitButtonState("loading", "正在解析...");
 
   try {
     const result = await parseNoteFromUrl(noteUrl);
@@ -79,23 +79,23 @@ form.addEventListener("submit", async (event) => {
     pushUrlHistory(noteUrl);
 
     const hasFallback = Boolean(result?.meta?.usedFallback);
-    setStatus(
-      hasFallback ? "error" : "success",
-      hasFallback ? "解析受限" : "解析完成",
-      hasFallback
-        ? "目标站点可能限制抓取，当前结果基于可读取内容整理，建议稍后重试。"
-        : "已成功提取图片、标题、正文、标签和提示词模板。"
-    );
+    setSubmitButtonState(hasFallback ? "idle" : "success", hasFallback ? DEFAULT_SUBMIT_BUTTON_TEXT : "解析完成");
   } catch (error) {
     renderResult(buildFallbackResult(noteUrl, ""));
-    setStatus(
-      "error",
-      "解析失败",
-      error instanceof Error ? error.message : "当前无法访问该链接内容，请稍后重试。"
-    );
+    setSubmitButtonState("idle");
   } finally {
-    submitButton.disabled = false;
+    if (submitButton.dataset.state !== "disabled-service") {
+      submitButton.disabled = false;
+    }
   }
+});
+
+urlInput.addEventListener("input", () => {
+  resetSubmitButtonForNewInput();
+});
+
+urlInput.addEventListener("change", () => {
+  resetSubmitButtonForNewInput();
 });
 
 carouselPrev.addEventListener("click", () => {
@@ -213,12 +213,7 @@ function warnIfOpenedFromFile() {
     return;
   }
 
-  setStatus(
-    "error",
-    "请通过本地服务打开",
-    "不要直接双击 index.html。请先运行 node server.js，再访问 http://127.0.0.1:3000/。"
-  );
-  submitButton.disabled = true;
+  setSubmitButtonState("disabled-service", "请先启动服务");
   urlInput.placeholder = "请先启动本地服务，再在浏览器里访问 http://127.0.0.1:3000/";
 }
 
@@ -277,6 +272,7 @@ function renderUrlHistory() {
     button.title = item;
     button.addEventListener("click", () => {
       urlInput.value = item;
+      resetSubmitButtonForNewInput();
       closeHistoryMenu();
       urlInput.focus();
     });
@@ -305,6 +301,14 @@ function closeHistoryMenu() {
   historyMenu.classList.add("hidden");
   historyButton.classList.remove("is-open");
   historyButton.setAttribute("aria-expanded", "false");
+}
+
+function resetSubmitButtonForNewInput() {
+  if (submitButton.dataset.state === "disabled-service" || submitButton.dataset.state === "loading") {
+    return;
+  }
+
+  setSubmitButtonState("idle");
 }
 
 function normalizeUrl(value) {
@@ -414,7 +418,16 @@ function collectMediaLinks(result) {
 }
 
 function dedupeMediaUrls(urls) {
-  return [...new Set(urls)];
+  const uniqueMap = new Map();
+
+  urls.forEach((url) => {
+    const key = buildImageDedupKey(url);
+    if (!uniqueMap.has(key)) {
+      uniqueMap.set(key, url);
+    }
+  });
+
+  return [...uniqueMap.values()];
 }
 
 function switchMediaTab(tabName) {
@@ -895,12 +908,30 @@ function moveCarousel(direction) {
   syncCarouselChrome();
 }
 
-function setStatus(type, title, message) {
-  statusCard.className = `status-card ${type}`;
-  statusCard.innerHTML = `
-    <strong>${escapeHtml(title)}</strong>
-    <p>${escapeHtml(message)}</p>
-  `;
+function setSubmitButtonState(state, label = DEFAULT_SUBMIT_BUTTON_TEXT) {
+  submitButton.dataset.state = state;
+  submitButton.textContent = label;
+  submitButton.classList.remove("is-loading", "is-success", "is-disabled-service");
+
+  if (state === "loading") {
+    submitButton.disabled = true;
+    submitButton.classList.add("is-loading");
+    return;
+  }
+
+  if (state === "success") {
+    submitButton.disabled = false;
+    submitButton.classList.add("is-success");
+    return;
+  }
+
+  if (state === "disabled-service") {
+    submitButton.disabled = true;
+    submitButton.classList.add("is-disabled-service");
+    return;
+  }
+
+  submitButton.disabled = false;
 }
 
 function escapeHtml(text) {
@@ -942,7 +973,7 @@ function toSourceImageUrl(imageUrl) {
       }
     }
 
-    return toDownloadableMediaUrl(sourceUrl);
+    return normalizeMediaUrlForList(sourceUrl);
   } catch (error) {
     return imageUrl;
   }
@@ -950,6 +981,20 @@ function toSourceImageUrl(imageUrl) {
 
 function isVideoUrl(url) {
   return /\.(mp4|mov|m4v|webm|m3u8)(\?|#|$)/i.test(url);
+}
+
+function normalizeMediaUrlForList(sourceUrl) {
+  const cleanUrl = new URL(sourceUrl.toString());
+
+  for (const key of [...cleanUrl.searchParams.keys()]) {
+    if (/^(w|h|width|height|quality|q|format|fit|resize|imageview2|x-oss-process|fm|fmt|ext)$/i.test(key)) {
+      cleanUrl.searchParams.delete(key);
+    }
+  }
+
+  cleanUrl.hash = "";
+  const query = cleanUrl.searchParams.toString();
+  return `${cleanUrl.origin}${cleanUrl.pathname}${query ? `?${query}` : ""}`;
 }
 
 function toDownloadableMediaUrl(sourceUrl) {
@@ -1016,7 +1061,7 @@ function buildImageDedupKey(imageUrl) {
     const pathname = normalizeImagePath(sourceUrl.pathname);
 
     if (/(xhscdn\.com|sns-webpic|qpic\.cn)/i.test(host)) {
-      return `${host}${pathname}`;
+      return `${host}:${buildCdnImageAssetKey(pathname)}`;
     }
 
     for (const key of [...sourceUrl.searchParams.keys()]) {
@@ -1029,6 +1074,18 @@ function buildImageDedupKey(imageUrl) {
   } catch (error) {
     return imageUrl;
   }
+}
+
+function buildCdnImageAssetKey(pathname) {
+  const segments = String(pathname || "")
+    .split("/")
+    .filter(Boolean);
+  const assetSegment = segments.at(-1) || pathname;
+
+  return assetSegment
+    .replace(/!\w[\w-]*/g, "")
+    .replace(/\.(jpg|jpeg|png|webp|gif|bmp|svg|avif|heic)$/i, "")
+    .toLowerCase();
 }
 
 function normalizeImagePath(pathname) {

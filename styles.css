@@ -51,6 +51,7 @@ img {
   width: min(1280px, calc(100% - 32px));
   margin: 0 auto;
   padding: 24px 0 64px;
+  transform: translateY(-50px);
 }
 
 .hero {
@@ -260,6 +261,25 @@ img {
   cursor: wait;
   opacity: 0.7;
   box-shadow: none;
+}
+
+#submit-button.is-loading {
+  background: linear-gradient(135deg, #ff6600 0%, #ff0066 100%);
+  color: #ffffff;
+  opacity: 0.92;
+}
+
+#submit-button.is-success {
+  background: #d9ff66;
+  color: #000000;
+  box-shadow: 0 14px 30px rgba(217, 255, 102, 0.32);
+}
+
+#submit-button.is-disabled-service {
+  background: #111111;
+  color: #ffffff;
+  cursor: not-allowed;
+  opacity: 0.82;
 }
 
 .history-button {

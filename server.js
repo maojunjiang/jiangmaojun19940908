@@ -309,7 +309,14 @@ function extractPrimaryImages(source, noteUrl) {
   if (isXiaohongshuUrl(noteUrl)) {
     const xhsData = extractXiaohongshuNoteData(source, noteUrl);
     addUniqueImages(candidates, xhsData.images, noteUrl);
-    addUniqueImages(candidates, extractXiaohongshuImagesFromSource(source), noteUrl);
+
+    if (!candidates.length) {
+      addUniqueImages(candidates, extractXiaohongshuImagesFromSource(source), noteUrl);
+    }
+
+    if (candidates.length) {
+      return dedupeAndRankImages(candidates).slice(0, 24);
+    }
   }
 
   addUniqueImages(candidates, extractScriptImages(source, noteUrl), noteUrl);
@@ -617,10 +624,9 @@ function extractXiaohongshuImagesFromImageList(imageList) {
       .filter((value) => !isThumbnailLikeImageUrl(value))
       .filter(Boolean);
 
-    for (const candidate of itemCandidates) {
-      if ((isXiaohongshuImageUrl(candidate) || isLikelyImage(candidate)) && !images.includes(candidate)) {
-        images.push(candidate);
-      }
+    const bestCandidate = pickBestImageCandidate(itemCandidates);
+    if (bestCandidate && !images.includes(bestCandidate)) {
+      images.push(bestCandidate);
     }
   }
 
@@ -1042,6 +1048,25 @@ function isXiaohongshuImageUrl(value) {
   return /(sns-webpic|xhscdn\.com|qpic\.cn|xiaohongshu\.com\/fe_api)/i.test(value);
 }
 
+function pickBestImageCandidate(candidates) {
+  let bestCandidate = "";
+  let bestScore = -Infinity;
+
+  for (const candidate of candidates) {
+    if (!(isXiaohongshuImageUrl(candidate) || isLikelyImage(candidate))) {
+      continue;
+    }
+
+    const score = scoreImageCandidate(candidate, 0) + scoreImageResolution(candidate);
+    if (score > bestScore) {
+      bestCandidate = candidate;
+      bestScore = score;
+    }
+  }
+
+  return bestCandidate;
+}
+
 function addImageCandidate(target, rawCandidate, baseUrl, baseScore) {
   const resolved = resolveUrl(rawCandidate, baseUrl);
   if (!resolved) {
@@ -1151,7 +1176,7 @@ function buildImageDedupKey(imageUrl) {
     const pathname = normalizeImagePath(parsed.pathname);
 
     if (/(xhscdn\.com|sns-webpic|qpic\.cn)/i.test(host)) {
-      return `${host}${pathname}`;
+      return `${host}:${buildCdnImageAssetKey(pathname)}`;
     }
 
     for (const key of [...parsed.searchParams.keys()]) {
@@ -1164,6 +1189,18 @@ function buildImageDedupKey(imageUrl) {
   } catch (error) {
     return imageUrl;
   }
+}
+
+function buildCdnImageAssetKey(pathname) {
+  const segments = String(pathname || "")
+    .split("/")
+    .filter(Boolean);
+  const assetSegment = segments.at(-1) || pathname;
+
+  return assetSegment
+    .replace(/!\w[\w-]*/g, "")
+    .replace(/\.(jpg|jpeg|png|webp|gif|bmp|svg|avif|heic)$/i, "")
+    .toLowerCase();
 }
 
 function normalizeImagePath(pathname) {
