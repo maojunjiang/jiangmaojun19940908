@@ -45,7 +45,9 @@ const swipeState = {
 let copyPromptResetTimer = 0;
 let copyAllImagesResetTimer = 0;
 let copyImagePromptResetTimer = 0;
+let imagePromptRequestSerial = 0;
 let urlHistory = loadUrlHistory();
+const imagePromptAnalysisCache = new Map();
 const mediaLinkState = {
   activeTab: "images",
   images: [],
@@ -385,11 +387,12 @@ function renderResult(result) {
   resultTitle.textContent = result.title || "-";
   resultBody.textContent = result.body || "-";
   resultPrompt.value = buildRewritePrompt(result);
-  resultImagePrompt.value = buildImageGenerationPrompt(result);
+  resultImagePrompt.value = "正在逐张分析图片视觉特征，请稍候...";
   resetCopyButton();
   resetImagePromptButton();
   resetAllImagesButton();
   syncMediaLinks(result);
+  void hydrateImageGenerationPrompt(result);
 
   resultTags.innerHTML = "";
   const safeTags = Array.isArray(result.tags) ? result.tags : [];
@@ -399,6 +402,25 @@ function renderResult(result) {
     tag.textContent = `#${tagText}`;
     resultTags.appendChild(tag);
   });
+}
+
+async function hydrateImageGenerationPrompt(result) {
+  const requestId = ++imagePromptRequestSerial;
+
+  try {
+    const promptText = await buildImageGenerationPrompt(result);
+    if (requestId !== imagePromptRequestSerial) {
+      return;
+    }
+
+    resultImagePrompt.value = promptText;
+  } catch (error) {
+    if (requestId !== imagePromptRequestSerial) {
+      return;
+    }
+
+    resultImagePrompt.value = buildImagePromptFallback(result);
+  }
 }
 
 function syncMediaLinks(result) {
@@ -435,6 +457,27 @@ function collectMediaLinks(result) {
   );
 
   return { images, videos };
+}
+
+function collectRenderableImageUrls(result) {
+  const rawImages = Array.isArray(result?.images) ? result.images : [];
+  const primaryImage = typeof result?.image === "string" ? result.image : "";
+  const merged = primaryImage ? [primaryImage, ...rawImages] : [...rawImages];
+  const uniqueMap = new Map();
+
+  merged.forEach((mediaUrl) => {
+    const sourceUrl = toSourceImageUrl(mediaUrl);
+    if (!sourceUrl || isVideoUrl(sourceUrl)) {
+      return;
+    }
+
+    const key = buildImageDedupKey(sourceUrl);
+    if (!uniqueMap.has(key)) {
+      uniqueMap.set(key, mediaUrl);
+    }
+  });
+
+  return [...uniqueMap.values()];
 }
 
 function dedupeMediaUrls(urls) {
@@ -549,73 +592,669 @@ function buildRewritePrompt(result) {
   ].join("\n");
 }
 
-function buildImageGenerationPrompt(result) {
+async function buildImageGenerationPrompt(result) {
   const profile = analyzeNoteProfile(result);
-  const styleHint = inferImageStyleHint(result, profile);
-  const compositionHint = inferImageCompositionHint(result, profile);
-  const colorHint = inferImageColorHint(result, profile);
-  const layoutHint = inferImageLayoutHint(result, profile);
-  const mediumHint = inferImageMediumHint(result, profile);
-  const lightingHint = inferImageLightingHint(result, profile);
-  const materialHint = inferImageMaterialHint(result, profile);
-  const qualityHint = inferImageQualityHint(result, profile);
-  const atmosphereHint = inferImageAtmosphereHint(result, profile);
-  const tagsText = formatPromptTags(result.tags);
-  const imageCount = collectImageReferenceUrls(result).length;
-  const imageSections = imageCount
-    ? Array.from({ length: imageCount }, (_, index) =>
-          [
-            `图片 ${index + 1}：`,
-            `请先准确分析这张图的主体、场景、镜头、构图、景别、视角、光线、用色、材质、版式感、氛围、媒介属性，然后单独输出这一张图的复刻 prompt。`,
-            `要求这张图的生成质量对齐原图，保留相同的视觉特征和完成度，优先做到“像同一张图”，而不是仅仅“风格相似”。`,
-            "输出字段：",
-            `- 视觉拆解：主体与场景 / 构图与镜头 / 光线与用色 / 材质与质感 / 版式与层次 / 媒介属性 / 质量标准`,
-            `- 复刻 prompt：写成一整段可直接喂给文生图模型的中文描述`,
-            `- 负面提示：列出这张图在复刻时必须避免的问题`
-          ].join("\n")
-        )
-        .join("\n\n")
-    : "图片 1：请在此处粘贴需要复刻的图片，然后按要求输出视觉拆解与复刻 prompt。";
+  const imageUrls = collectPromptAnalysisImageUrls(result);
+
+  if (!imageUrls.length) {
+    return buildImagePromptFallback(result);
+  }
+
+  const scenes = await Promise.all(
+    imageUrls.map((imageUrl, index) => analyzePromptImage(imageUrl, result, profile, index))
+  );
+
+  const imageSections = scenes
+    .map((scene, index) => {
+      const serial = toChineseIndex(index + 1);
+      return [
+        `图${serial}`,
+        `风格：${scene.style}`,
+        `构图：${scene.composition}`,
+        `景别与机位：${scene.camera}`,
+        `背景：${scene.background}`,
+        `光线：${scene.light}`,
+        `色彩：${scene.color}`,
+        `材质与质感：${scene.material}`,
+        `主体与道具细节：${scene.details}`,
+        `文字与版式（如有）：${scene.typography}`,
+        `氛围关键词：${scene.mood}`,
+        "产品主体保持要求：保留你上传产品图的外形、比例、品牌与文字信息，只迁移本图的场景、构图、机位、光线和色彩。",
+        `复刻 prompt（产品融合版）：${scene.prompt}`,
+        `负面提示：${scene.negative}`,
+        `参数建议：${scene.params}`,
+      ].join("\n");
+    })
+    .join("\n\n---\n\n");
 
   return [
-    "你是一名专业视觉设计总监兼 AI 视觉复刻提示词专家。",
-    "请对以下每一张图片分别进行专业视觉拆解，并为每一张图单独生成可直接用于文生图模型的复刻 prompt。",
+    "以下内容为基于解析图片逐张完成的视觉分析结果。",
+    "每一段都对应原帖中的单独一张图，可直接配合你上传的产品图使用。",
     "",
-    "总要求：",
-    "1. 每张图都要单独分析、单独输出，不要合并成一个泛化模板。",
-    "2. 目标不是做“相似风格图”，而是尽量复刻出和原图一致的视觉特征、完成度和画面质量。",
-    "3. 从专业角度分析每张图的主体、场景、构图、景别、镜头视角、画风、光线、用色、材质、版式、氛围、媒介属性，必要时判断是实拍、棚拍、静物、海报、渲染还是插画。",
-    "4. 生成的 prompt 要足够具体，能让其他 AI 尽量还原原图，而不是只给抽象关键词。",
-    "5. 不要写“参考这张图”“结合上下文”这种依赖额外说明的话，结果要能直接复制给其他 AI 使用。",
-    "6. 如果图片中有多人物、多主体、多层背景、文字排版、道具细节、空间透视、色彩重点，都要明确写进 prompt。",
-    "",
-    "整组图片的辅助判断：",
-    `- 内容主题：${profile.topicPosition}`,
-    `- 主体类型：${profile.subjectFocus}`,
-    `- 常见画风倾向：${styleHint}`,
-    `- 常见构图倾向：${compositionHint}`,
-    `- 常见用色倾向：${colorHint}`,
-    `- 常见光线倾向：${lightingHint}`,
-    `- 常见材质倾向：${materialHint}`,
-    `- 常见版式倾向：${layoutHint}`,
-    `- 常见媒介判断：${mediumHint}`,
-    `- 常见氛围判断：${atmosphereHint}`,
-    `- 质量对齐要求：${qualityHint}`,
-    `- 辅助关键词：${tagsText}`,
-    "",
-    "请按以下格式输出：",
-    "图片 1",
-    "视觉拆解：",
-    "复刻 prompt：",
-    "负面提示：",
-    "",
-    "图片 2",
-    "视觉拆解：",
-    "复刻 prompt：",
-    "负面提示：",
-    "",
-    imageSections
+    imageSections,
   ].join("\n");
+}
+
+function collectPromptAnalysisImageUrls(result) {
+  return collectRenderableImageUrls(result);
+}
+
+function buildImagePromptFallback(result) {
+  const profile = analyzeNoteProfile(result);
+  return [
+    "当前未能完成逐张视觉分析，已切换为保守兜底提示词。",
+    `内容主题：${profile.topicPosition}`,
+    `主体类型：${profile.subjectFocus}`,
+    "复刻 prompt（产品融合版）：保留你上传产品图的外形、比例、品牌与文字信息，仅迁移参考图的构图、背景层次、光线、色彩和氛围，生成真实自然的高质量实拍效果。",
+  ].join("\n");
+}
+
+async function analyzePromptImage(imageUrl, result, profile, index) {
+  try {
+    const visual = await getCachedPromptImageAnalysis(imageUrl);
+    return buildSceneProfileFromVisual(result, profile, visual, index);
+  } catch (error) {
+    return buildSceneProfileFallback(result, profile, index);
+  }
+}
+
+function getCachedPromptImageAnalysis(imageUrl) {
+  const cacheKey = buildImageDedupKey(imageUrl);
+
+  if (!imagePromptAnalysisCache.has(cacheKey)) {
+    const analysisPromise = analyzeImageVisualMetrics(imageUrl).catch((error) => {
+      imagePromptAnalysisCache.delete(cacheKey);
+      throw error;
+    });
+    imagePromptAnalysisCache.set(cacheKey, analysisPromise);
+  }
+
+  return imagePromptAnalysisCache.get(cacheKey);
+}
+
+async function analyzeImageVisualMetrics(imageUrl) {
+  const image = await loadImageForPromptAnalysis(imageUrl);
+  const metrics = sampleImageVisualMetrics(image);
+  return {
+    ...metrics,
+    aspectRatio: image.naturalWidth / Math.max(image.naturalHeight, 1),
+  };
+}
+
+function loadImageForPromptAnalysis(imageUrl) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.decoding = "async";
+    image.crossOrigin = "anonymous";
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error(`Image load failed: ${imageUrl}`));
+    image.src = imageUrl;
+  });
+}
+
+function sampleImageVisualMetrics(image) {
+  const maxSide = 160;
+  const scale = Math.min(1, maxSide / Math.max(image.naturalWidth || image.width, image.naturalHeight || image.height, 1));
+  const width = Math.max(32, Math.round((image.naturalWidth || image.width || maxSide) * scale));
+  const height = Math.max(32, Math.round((image.naturalHeight || image.height || maxSide) * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  if (!context) {
+    throw new Error("Canvas context unavailable");
+  }
+
+  context.drawImage(image, 0, 0, width, height);
+  const { data } = context.getImageData(0, 0, width, height);
+  const grayscale = new Float32Array(width * height);
+  const colorCounts = new Map();
+
+  let sumR = 0;
+  let sumG = 0;
+  let sumB = 0;
+  let sumLum = 0;
+  let sumLumSq = 0;
+  let sumSat = 0;
+  let topLum = 0;
+  let bottomLum = 0;
+  let topCount = 0;
+  let bottomCount = 0;
+  let topBlueHits = 0;
+  let greenHits = 0;
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const pixelIndex = y * width + x;
+      const offset = pixelIndex * 4;
+      const r = data[offset];
+      const g = data[offset + 1];
+      const b = data[offset + 2];
+      const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+      const [hue, saturation, lightness] = rgbToHsl(r, g, b);
+
+      grayscale[pixelIndex] = lum;
+      sumR += r;
+      sumG += g;
+      sumB += b;
+      sumLum += lum;
+      sumLumSq += lum * lum;
+      sumSat += saturation;
+
+      if (y < height / 3) {
+        topLum += lum;
+        topCount += 1;
+        if (hue >= 180 && hue <= 250 && saturation >= 0.16 && lightness >= 0.45) {
+          topBlueHits += 1;
+        }
+      }
+
+      if (y >= (height * 2) / 3) {
+        bottomLum += lum;
+        bottomCount += 1;
+      }
+
+      if (hue >= 70 && hue <= 165 && saturation >= 0.15 && lightness >= 0.22) {
+        greenHits += 1;
+      }
+
+      const colorName = describeColorName(hue, saturation, lightness);
+      colorCounts.set(colorName, (colorCounts.get(colorName) || 0) + 1);
+    }
+  }
+
+  let edgeSum = 0;
+  let edgeWeightSum = 0;
+  let weightedX = 0;
+  let weightedY = 0;
+  let weightedXX = 0;
+  let weightedYY = 0;
+  let edgeDensity = 0;
+
+  for (let y = 1; y < height - 1; y += 1) {
+    for (let x = 1; x < width - 1; x += 1) {
+      const pixelIndex = y * width + x;
+      const gx = grayscale[pixelIndex + 1] - grayscale[pixelIndex - 1];
+      const gy = grayscale[pixelIndex + width] - grayscale[pixelIndex - width];
+      const edge = Math.abs(gx) + Math.abs(gy);
+      const weight = edge + 1;
+
+      edgeSum += edge;
+      edgeWeightSum += weight;
+      weightedX += weight * x;
+      weightedY += weight * y;
+      weightedXX += weight * x * x;
+      weightedYY += weight * y * y;
+
+      if (edge >= 30) {
+        edgeDensity += 1;
+      }
+    }
+  }
+
+  const sampleCount = Math.max((width - 2) * (height - 2), 1);
+  const avgLum = sumLum / Math.max(width * height, 1);
+  const contrast = Math.sqrt(Math.max(sumLumSq / Math.max(width * height, 1) - avgLum * avgLum, 0));
+  const avgSat = sumSat / Math.max(width * height, 1);
+  const centerX = edgeWeightSum ? weightedX / edgeWeightSum / Math.max(width - 1, 1) : 0.5;
+  const centerY = edgeWeightSum ? weightedY / edgeWeightSum / Math.max(height - 1, 1) : 0.5;
+  const spreadX = edgeWeightSum
+    ? Math.sqrt(Math.max(weightedXX / edgeWeightSum - (weightedX / edgeWeightSum) ** 2, 0)) / Math.max(width, 1)
+    : 0.25;
+  const spreadY = edgeWeightSum
+    ? Math.sqrt(Math.max(weightedYY / edgeWeightSum - (weightedY / edgeWeightSum) ** 2, 0)) / Math.max(height, 1)
+    : 0.25;
+  const focusRadiusX = Math.max(6, Math.floor(width * 0.18));
+  const focusRadiusY = Math.max(6, Math.floor(height * 0.18));
+  const focusCenterX = Math.round(centerX * (width - 1));
+  const focusCenterY = Math.round(centerY * (height - 1));
+
+  let focusSharpness = 0;
+  let focusSharpnessCount = 0;
+  let backgroundSharpness = 0;
+  let backgroundSharpnessCount = 0;
+
+  for (let y = 1; y < height - 1; y += 1) {
+    for (let x = 1; x < width - 1; x += 1) {
+      const pixelIndex = y * width + x;
+      const edge =
+        Math.abs(grayscale[pixelIndex + 1] - grayscale[pixelIndex - 1]) +
+        Math.abs(grayscale[pixelIndex + width] - grayscale[pixelIndex - width]);
+
+      const inFocusPatch =
+        Math.abs(x - focusCenterX) <= focusRadiusX &&
+        Math.abs(y - focusCenterY) <= focusRadiusY;
+
+      if (inFocusPatch) {
+        focusSharpness += edge;
+        focusSharpnessCount += 1;
+      } else {
+        backgroundSharpness += edge;
+        backgroundSharpnessCount += 1;
+      }
+    }
+  }
+
+  const dominantColors = [...colorCounts.entries()]
+    .sort((left, right) => right[1] - left[1])
+    .map(([name]) => name)
+    .filter((name, index, list) => list.indexOf(name) === index)
+    .slice(0, 3);
+
+  const averageR = sumR / Math.max(width * height, 1);
+  const averageB = sumB / Math.max(width * height, 1);
+  const topBlueRatio = topBlueHits / Math.max(topCount, 1);
+  const greenRatio = greenHits / Math.max(width * height, 1);
+  const topBrightness = topLum / Math.max(topCount, 1);
+  const bottomBrightness = bottomLum / Math.max(bottomCount, 1);
+  const focusSharpnessMean = focusSharpness / Math.max(focusSharpnessCount, 1);
+  const backgroundSharpnessMean = backgroundSharpness / Math.max(backgroundSharpnessCount, 1);
+
+  return {
+    width,
+    height,
+    averageBrightness: avgLum,
+    contrast,
+    averageSaturation: avgSat,
+    averageWarmth: averageR - averageB,
+    dominantColors,
+    centerX,
+    centerY,
+    spreadX,
+    spreadY,
+    edgeDensity: edgeDensity / sampleCount,
+    sharpness: edgeSum / sampleCount,
+    focusSharpness: focusSharpnessMean,
+    backgroundSharpness: backgroundSharpnessMean,
+    depthContrast: focusSharpnessMean / Math.max(backgroundSharpnessMean, 1),
+    topBlueRatio,
+    greenRatio,
+    topBrightness,
+    bottomBrightness,
+    isOutdoor:
+      topBlueRatio >= 0.09 ||
+      greenRatio >= 0.12 ||
+      (topBrightness >= 150 && avgLum >= 118 && averageR < averageB + 8),
+    isNight: avgLum <= 105 && contrast >= 32,
+    hasStructuredLines: edgeDensity >= 0.22 && avgSat <= 0.28,
+    isCleanBackground: edgeDensity <= 0.14 && avgSat <= 0.3,
+  };
+}
+
+function buildSceneProfileFromVisual(result, profile, visual, index) {
+  const style = describeVisualStyle(visual);
+  const composition = describeVisualComposition(visual);
+  const camera = describeVisualCamera(visual);
+  const background = describeVisualBackground(result, profile, visual);
+  const light = describeVisualLighting(visual);
+  const color = describeVisualColor(visual);
+  const material = describeVisualMaterial(profile, visual);
+  const details = describeVisualDetails(profile, visual);
+  const typography = "若产品本身带品牌或文字信息，保持原样并确保清晰可读，不改字不乱码。";
+  const mood = describeVisualMood(visual);
+  const prompt = buildVisualReplicaPrompt({
+    composition,
+    camera,
+    background,
+    light,
+    color,
+    material,
+    details,
+    mood,
+    profile,
+  });
+
+  return {
+    style,
+    composition,
+    camera,
+    background,
+    light,
+    color,
+    material,
+    details,
+    typography,
+    mood,
+    prompt,
+    negative: buildVisualNegativePrompt(visual),
+    params: buildVisualParamHint(visual),
+    index,
+  };
+}
+
+function buildSceneProfileFallback(result, profile) {
+  const fallbackStyle = inferImageStyleHint(result, profile);
+  const fallbackComposition = inferImageCompositionHint(result, profile);
+  const fallbackColor = inferImageColorHint(result, profile);
+  const fallbackLight = inferImageLightingHint(result, profile);
+  const fallbackMaterial = inferImageMaterialHint(result, profile);
+  const fallbackMood = inferImageAtmosphereHint(result, profile);
+
+  return {
+    style: fallbackStyle,
+    composition: fallbackComposition,
+    camera: "中近景平视机位，主体清晰，背景轻微虚化",
+    background: `围绕“${profile.topicPosition}”的真实生活场景`,
+    light: fallbackLight,
+    color: fallbackColor,
+    material: fallbackMaterial,
+    details: "保留产品主体边缘、比例、品牌与文字信息，确保结构清楚不变形。",
+    typography: "若产品带有品牌或文字信息，保持原样并确保清晰可读。",
+    mood: fallbackMood,
+    prompt:
+      "以你上传的产品为唯一主体，保留原有外形、比例、品牌与文字信息，只迁移参考图的场景、构图、机位、光线与色彩关系，生成真实自然的高质量实拍成片。",
+    negative:
+      "不要替换产品主体，不要改变产品外形比例，不要篡改品牌logo或文字，不要塑料感CG，不要过度磨皮，不要文字乱码。",
+    params: "画幅 3:4，写实强度中高，清晰度优先，细节优先。",
+  };
+}
+
+function describeVisualStyle(visual) {
+  if (visual.isNight) {
+    return visual.depthContrast >= 1.18 ? "夜间氛围实拍，浅景深纪实感" : "夜间纪实实拍，环境氛围明显";
+  }
+
+  if (visual.isOutdoor) {
+    return visual.contrast >= 55 ? "户外纪实抓拍，生活感和现场感都比较强" : "清透自然的户外生活方式实拍";
+  }
+
+  if (visual.isCleanBackground) {
+    return "克制简洁的静物/产品实拍，画面干净";
+  }
+
+  if (visual.hasStructuredLines) {
+    return "空间线条感明显的生活方式实拍";
+  }
+
+  return "真实生活方式实拍，保留内容感和自然环境信息";
+}
+
+function describeVisualComposition(visual) {
+  const horizontal = visual.centerX <= 0.38 ? "偏左" : visual.centerX >= 0.62 ? "偏右" : "居中";
+  const vertical = visual.centerY <= 0.38 ? "偏上" : visual.centerY >= 0.62 ? "偏下" : "居中";
+  const placement =
+    horizontal === "居中" && vertical === "居中"
+      ? "主体位于画面中心"
+      : horizontal === "居中"
+        ? `主体居中${vertical}`
+        : vertical === "居中"
+          ? `主体${horizontal}`
+          : `主体${horizontal}${vertical}`;
+  const focusScale =
+    (visual.spreadX + visual.spreadY) / 2 <= 0.18
+      ? "主体占比高，视觉焦点集中"
+      : (visual.spreadX + visual.spreadY) / 2 <= 0.28
+        ? "主体与环境比例平衡"
+        : "保留较多环境信息，主体和场景共同成画";
+
+  return `${placement}，${focusScale}`;
+}
+
+function describeVisualCamera(visual) {
+  const spreadAverage = (visual.spreadX + visual.spreadY) / 2;
+  const shotScale = spreadAverage <= 0.18 ? "近景特写" : spreadAverage <= 0.28 ? "中近景" : "中景";
+  const angle = visual.centerY <= 0.38 ? "略仰视机位" : visual.centerY >= 0.62 ? "略俯视机位" : "平视机位";
+  const depth = visual.depthContrast >= 1.18 ? "主体清晰，背景轻虚化" : "整体清晰，景深偏深";
+  return `${shotScale}，${angle}，${depth}`;
+}
+
+function describeVisualBackground(result, profile, visual) {
+  const analysisText = buildAnalysisText(result);
+
+  if (visual.isNight) {
+    return "夜间环境背景，常见门店灯光、街景光斑或暗部层次";
+  }
+
+  if (visual.isOutdoor) {
+    if (visual.greenRatio >= 0.12 && visual.topBlueRatio >= 0.09) {
+      return "户外街景或自然环境背景，带天空、绿植或道路空间信息";
+    }
+
+    return "户外街景或道路背景，环境信息保留得比较明显";
+  }
+
+  if (visual.hasStructuredLines) {
+    return "室内空间背景，带明显建筑线条、柜台、楼梯或结构透视";
+  }
+
+  if (visual.isCleanBackground) {
+    return "简洁室内或桌面背景，干扰元素少，主体更突出";
+  }
+
+  if (/(探店|门店|餐厅|咖啡馆|吧台)/.test(analysisText)) {
+    return "门店或吧台类背景，保留轻微环境信息和空间层次";
+  }
+
+  return `围绕“${profile.topicPosition}”形成的真实生活场景背景`;
+}
+
+function describeVisualLighting(visual) {
+  if (visual.isNight) {
+    return visual.averageWarmth >= 10 ? "夜间暖色人工光与环境杂光混合，亮部有氛围高光" : "夜间冷色环境光为主，暗部保留细节";
+  }
+
+  if (visual.isOutdoor) {
+    return visual.contrast >= 55 ? "自然日光更直接，亮部清楚，阴影关系明确" : "自然散射光为主，整体柔和通透";
+  }
+
+  if (visual.averageWarmth >= 12) {
+    return "室内偏暖环境光，亮部柔和，主体边缘有自然高光";
+  }
+
+  if (visual.averageWarmth <= -12) {
+    return "室内偏冷环境光，整体干净克制，明暗关系清楚";
+  }
+
+  return "室内环境光与柔和补光混合，亮部不过曝，暗部不发闷";
+}
+
+function describeVisualColor(visual) {
+  const palette = visual.dominantColors.length ? visual.dominantColors.join("、") : "中性色";
+  const temperature = visual.averageWarmth >= 12 ? "整体偏暖" : visual.averageWarmth <= -12 ? "整体偏冷" : "整体偏中性";
+  const saturation = visual.averageSaturation >= 0.36 ? "颜色存在明显主次对比" : visual.averageSaturation <= 0.2 ? "饱和度克制" : "饱和度适中";
+  return `以${palette}为主，${temperature}，${saturation}`;
+}
+
+function describeVisualMaterial(profile, visual) {
+  if (/(饮品|美食)/.test(profile.subjectFocus)) {
+    return "透明外壁、液体层次、表面高光和包装边缘要清楚，保留真实通透感";
+  }
+
+  if (/(穿搭单品)/.test(profile.subjectFocus)) {
+    return "产品表面纹理、折痕、边缘反光和材质触感要真实";
+  }
+
+  if (/(人物)/.test(profile.subjectFocus)) {
+    return "产品主体的包装、边缘、反光与接触阴影要真实，避免悬浮感";
+  }
+
+  return visual.averageSaturation <= 0.22
+    ? "产品表面纹理、包装边缘和反光层次要清楚，整体质感克制真实"
+    : "产品主体的反光、纹理、边缘和材质层次要清楚，保留真实触感";
+}
+
+function describeVisualDetails(profile, visual) {
+  if (visual.depthContrast >= 1.18) {
+    return "保留参考图的焦点位置与背景虚化层次，让主体边缘清晰、背景退后。";
+  }
+
+  if (visual.hasStructuredLines) {
+    return "保留环境中的线条透视、结构层次和空间纵深，不要把背景做平。";
+  }
+
+  if (visual.isCleanBackground) {
+    return "减少无关道具，让主体轮廓、品牌与文字信息更醒目。";
+  }
+
+  return `保留${profile.subjectFocus}场景里常见的环境辅助元素，但不要喧宾夺主。`;
+}
+
+function describeVisualMood(visual) {
+  if (visual.isNight) {
+    return "夜间、氛围感、真实、有情绪张力";
+  }
+
+  if (visual.isOutdoor) {
+    return visual.averageSaturation >= 0.34 ? "清透、轻松、在场感强" : "自然、日常、松弛";
+  }
+
+  if (visual.isCleanBackground) {
+    return "克制、干净、可信赖";
+  }
+
+  if (visual.hasStructuredLines) {
+    return "现代、清爽、空间感明确";
+  }
+
+  return "真实、自然、内容感强";
+}
+
+function buildVisualReplicaPrompt(scene) {
+  return [
+    "以你上传的产品为唯一主体，放在参考图主体所在的视觉焦点位置，",
+    `${scene.composition}，${scene.camera}，`,
+    `背景为${scene.background}，`,
+    `光线表现为${scene.light}，`,
+    `整体色彩${scene.color}，`,
+    "保留产品原有外形、比例、品牌与文字信息，",
+    `重点呈现${scene.material}，`,
+    `${scene.details}`,
+    `整体氛围${scene.mood}，`,
+    "输出真实自然、可直接用于社交媒体内容的高质量实拍成片。",
+  ].join("");
+}
+
+function buildVisualNegativePrompt(visual) {
+  const parts = [
+    "不要替换产品主体",
+    "不要改变产品外形比例",
+    "不要篡改品牌logo或文字",
+    "不要文字乱码",
+    "不要塑料感CG",
+    "不要过度磨皮",
+  ];
+
+  if (visual.isNight) {
+    parts.push("不要把夜景压成死黑");
+    parts.push("不要出现脏噪点");
+  }
+
+  if (visual.isOutdoor) {
+    parts.push("不要做成纯棚拍背景");
+  }
+
+  if (visual.depthContrast >= 1.18) {
+    parts.push("不要让背景比主体还清晰");
+  } else {
+    parts.push("不要把背景虚化过度");
+  }
+
+  return parts.join("，");
+}
+
+function buildVisualParamHint(visual) {
+  const ratio = inferAspectRatioLabel(visual.aspectRatio);
+  const depth = visual.depthContrast >= 1.18 ? "浅到中景深" : "中等景深";
+  const lightProtection = visual.isNight ? "暗部细节优先" : "高光保护优先";
+  return `画幅 ${ratio}，写实强度中高，${depth}，${lightProtection}，清晰度优先。`;
+}
+
+function inferAspectRatioLabel(aspectRatio) {
+  if (aspectRatio <= 0.78) {
+    return "3:4 竖版";
+  }
+
+  if (aspectRatio >= 1.2) {
+    return "4:3 横版";
+  }
+
+  return "接近 1:1";
+}
+
+function rgbToHsl(r, g, b) {
+  const red = r / 255;
+  const green = g / 255;
+  const blue = b / 255;
+  const max = Math.max(red, green, blue);
+  const min = Math.min(red, green, blue);
+  const lightness = (max + min) / 2;
+
+  if (max === min) {
+    return [0, 0, lightness];
+  }
+
+  const delta = max - min;
+  const saturation =
+    lightness > 0.5 ? delta / (2 - max - min) : delta / Math.max(max + min, 0.00001);
+
+  let hue = 0;
+  if (max === red) {
+    hue = (green - blue) / delta + (green < blue ? 6 : 0);
+  } else if (max === green) {
+    hue = (blue - red) / delta + 2;
+  } else {
+    hue = (red - green) / delta + 4;
+  }
+
+  return [Math.round(hue * 60), saturation, lightness];
+}
+
+function describeColorName(hue, saturation, lightness) {
+  if (lightness <= 0.12) {
+    return "深黑";
+  }
+
+  if (saturation <= 0.08) {
+    if (lightness >= 0.85) {
+      return "米白";
+    }
+
+    if (lightness >= 0.62) {
+      return "浅灰";
+    }
+
+    return "深灰";
+  }
+
+  if (hue < 15 || hue >= 345) {
+    return lightness >= 0.62 ? "浅红" : "红色";
+  }
+
+  if (hue < 40) {
+    return lightness >= 0.62 ? "浅橙" : "橙色";
+  }
+
+  if (hue < 65) {
+    return lightness >= 0.62 ? "浅黄" : "黄色";
+  }
+
+  if (hue < 170) {
+    return lightness >= 0.62 ? "浅绿" : "绿色";
+  }
+
+  if (hue < 200) {
+    return lightness >= 0.62 ? "浅青" : "青色";
+  }
+
+  if (hue < 255) {
+    return lightness >= 0.62 ? "浅蓝" : "蓝色";
+  }
+
+  if (hue < 320) {
+    return lightness >= 0.62 ? "浅紫" : "紫色";
+  }
+
+  return lightness >= 0.62 ? "浅粉" : "粉色";
+}
+
+function toChineseIndex(value) {
+  const labels = ["一", "二", "三", "四", "五", "六", "七", "八", "九", "十"];
+  if (value >= 1 && value <= labels.length) {
+    return labels[value - 1];
+  }
+
+  return String(value);
 }
 
 function collectImageReferenceUrls(result) {
@@ -1123,19 +1762,7 @@ function resetAllImagesButton() {
 }
 
 function normalizeImages(result) {
-  const images = Array.isArray(result.images) ? result.images : [];
-  const primaryImage = typeof result.image === "string" ? result.image : "";
-  const merged = primaryImage ? [...images, primaryImage] : [...images];
-  const uniqueMap = new Map();
-
-  merged.forEach((imageUrl) => {
-    const key = buildImageDedupKey(imageUrl);
-    if (!uniqueMap.has(key)) {
-      uniqueMap.set(key, imageUrl);
-    }
-  });
-
-  const unique = [...uniqueMap.values()];
+  const unique = collectRenderableImageUrls(result);
   return unique.length ? unique : [FALLBACK_IMAGE];
 }
 
