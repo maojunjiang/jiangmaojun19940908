@@ -19,10 +19,12 @@ const tabImages = document.querySelector("#tab-images");
 const tabVideos = document.querySelector("#tab-videos");
 const copyAllImagesButton = document.querySelector("#copy-all-images-button");
 const resultPrompt = document.querySelector("#result-prompt");
+const rewriteMessagesOutput = document.querySelector("#rewrite-messages-output");
 const rewriteDirectionInput = document.querySelector("#rewrite-direction-input");
 const regeneratePromptButton = document.querySelector("#regenerate-prompt-button");
 const copyPromptButton = document.querySelector("#copy-prompt-button");
 const resultImagePrompt = document.querySelector("#result-image-prompt");
+const imageMessagesOutput = document.querySelector("#image-messages-output");
 const imageDirectionInput = document.querySelector("#image-direction-input");
 const regenerateImagePromptButton = document.querySelector("#regenerate-image-prompt-button");
 const copyImagePromptButton = document.querySelector("#copy-image-prompt-button");
@@ -385,19 +387,27 @@ async function parseNoteFromUrl(noteUrl) {
   return response.json();
 }
 
-async function requestAiPrompts(result, options = {}) {
-  const payload = {
+async function buildPromptRequestPayload(result, options = {}) {
+  const target = normalizePromptTarget(options.target);
+  const includeImageAnalyses = target === "image" || target === "all";
+  return {
     result: {
       title: result?.title || "",
       body: result?.body || "",
       tags: Array.isArray(result?.tags) ? result.tags : [],
-      image: typeof result?.image === "string" ? toSourceImageUrl(result.image) : "",
-      images: collectMediaLinks(result).images,
+      image: includeImageAnalyses && typeof result?.image === "string" ? toSourceImageUrl(result.image) : "",
+      images: includeImageAnalyses ? collectMediaLinks(result).images : [],
+      imageAnalyses: includeImageAnalyses ? await buildImageAnalysisPayload(result) : [],
     },
-    target: normalizePromptTarget(options.target),
+    target,
     rewriteDirection: typeof options.rewriteDirection === "string" ? options.rewriteDirection.trim() : "",
-    imageDirection: typeof options.imageDirection === "string" ? options.imageDirection.trim() : "",
+    imageDirection:
+      target === "rewrite" ? "" : typeof options.imageDirection === "string" ? options.imageDirection.trim() : "",
   };
+}
+
+async function requestAiPrompts(result, options = {}) {
+  const payload = options.payload ? options.payload : await buildPromptRequestPayload(result, options);
 
   const response = await fetch("/api/prompts", {
     method: "POST",
@@ -409,13 +419,47 @@ async function requestAiPrompts(result, options = {}) {
 
   const parsed = await response.json().catch(() => null);
   if (!response.ok) {
-    throw new Error(parsed?.error || "AI prompt request failed.");
+    const error = new Error(parsed?.error || "AI prompt request failed.");
+    error.debugMessages = Array.isArray(parsed?.debugMessages) ? parsed.debugMessages : [];
+    throw error;
   }
 
   return {
     rewritePrompt: typeof parsed?.rewritePrompt === "string" ? parsed.rewritePrompt.trim() : "",
     imagePrompt: typeof parsed?.imagePrompt === "string" ? parsed.imagePrompt.trim() : "",
+    debugMessages: Array.isArray(parsed?.debugMessages) ? parsed.debugMessages : [],
   };
+}
+
+async function buildImageAnalysisPayload(result) {
+  const profile = analyzeNoteProfile(result);
+  const imageUrls = collectPromptAnalysisImageUrls(result);
+  if (!imageUrls.length) {
+    return [];
+  }
+
+  const scenes = await Promise.all(
+    imageUrls.map((imageUrl, index) => analyzePromptImage(imageUrl, result, profile, index))
+  );
+
+  return scenes.map((scene, index) => ({
+    imageLabel: `图片${index + 1}`,
+    style: scene.style || "",
+    composition: scene.composition || "",
+    camera: scene.camera || "",
+    background: scene.background || "",
+    light: scene.light || "",
+    color: scene.color || "",
+    material: scene.material || "",
+    details: scene.details || "",
+    typography: scene.typography || "",
+    mood: scene.mood || "",
+    prompt: scene.prompt || "",
+    negative: scene.negative || "",
+    params: scene.params || "",
+    spreadX: Number.isFinite(scene.spreadX) ? scene.spreadX : null,
+    spreadY: Number.isFinite(scene.spreadY) ? scene.spreadY : null,
+  }));
 }
 
 function normalizePromptTarget(target) {
@@ -452,6 +496,8 @@ function renderResult(result) {
 
   resultTitle.textContent = result.title || "-";
   resultBody.textContent = result.body || "-";
+  setPromptMessagesOutput(rewriteMessagesOutput, []);
+  setPromptMessagesOutput(imageMessagesOutput, []);
   resultPrompt.value = "正在调用 AI 生成仿写提示词，请稍候...";
   resultImagePrompt.value = "正在调用 AI 提炼场景迁移模板，请稍候...";
   setRegenerateButtonState(regeneratePromptButton, true, "重新生成");
@@ -475,36 +521,80 @@ function renderResult(result) {
   });
 }
 
+function setPromptMessagesOutput(output, messages) {
+  if (!output) {
+    return;
+  }
+
+  output.value = Array.isArray(messages) && messages.length ? JSON.stringify(messages, null, 2) : "-";
+}
+
+function getPromptNotGeneratedText() {
+  return "未通过大模型生成提示词";
+}
+
 async function hydratePromptOutputs(result, options = {}) {
   const rewriteRequestId = ++rewritePromptRequestSerial;
   const imageRequestId = ++imagePromptRequestSerial;
   const rewriteDirection = typeof options.rewriteDirection === "string" ? options.rewriteDirection.trim() : "";
   const imageDirection = typeof options.imageDirection === "string" ? options.imageDirection.trim() : "";
 
+  void hydrateAiImagePrompt(result, imageRequestId, imageDirection);
+
   try {
-    const aiPrompts = await requestAiPrompts(result, {
-      target: "all",
+    const payload = await buildPromptRequestPayload(result, {
+      target: "rewrite",
       rewriteDirection,
-      imageDirection,
+      imageDirection: "",
+    });
+
+    const aiPrompts = await requestAiPrompts(result, {
+      target: "rewrite",
+      rewriteDirection,
+      imageDirection: "",
+      payload,
     });
 
     if (rewriteRequestId === rewritePromptRequestSerial) {
-      resultPrompt.value = aiPrompts.rewritePrompt || buildRewritePrompt(result, rewriteDirection);
-    }
-
-    if (imageRequestId === imagePromptRequestSerial) {
-      resultImagePrompt.value =
-        aiPrompts.imagePrompt || (await buildImageGenerationPrompt(result, imageDirection));
+      setPromptMessagesOutput(rewriteMessagesOutput, aiPrompts.debugMessages);
+      resultPrompt.value = aiPrompts.rewritePrompt || getPromptNotGeneratedText();
     }
   } catch (error) {
     if (rewriteRequestId === rewritePromptRequestSerial) {
-      resultPrompt.value = buildRewritePrompt(result, rewriteDirection);
+      resultPrompt.value = getPromptNotGeneratedText();
+      setPromptMessagesOutput(rewriteMessagesOutput, error?.debugMessages);
+    }
+  }
+}
+
+async function hydrateAiImagePrompt(result, requestId, direction = "") {
+  try {
+    const payload = await buildPromptRequestPayload(result, {
+      target: "image",
+      rewriteDirection: getRewriteDirectionValue(),
+      imageDirection: direction,
+    });
+
+    const aiPromptsPromise = requestAiPrompts(result, {
+      target: "image",
+      rewriteDirection: getRewriteDirectionValue(),
+      imageDirection: direction,
+      payload,
+    });
+
+    const aiPrompts = await aiPromptsPromise;
+    if (requestId !== imagePromptRequestSerial) {
+      return;
     }
 
-    if (imageRequestId === imagePromptRequestSerial) {
-      resultImagePrompt.value = buildImagePromptFallback(result, imageDirection);
-      void hydrateImageGenerationPromptFallback(result, imageRequestId, imageDirection);
+    setPromptMessagesOutput(imageMessagesOutput, aiPrompts.debugMessages);
+    resultImagePrompt.value = aiPrompts.imagePrompt || getPromptNotGeneratedText();
+  } catch (error) {
+    if (requestId !== imagePromptRequestSerial) {
+      return;
     }
+    resultImagePrompt.value = getPromptNotGeneratedText();
+    setPromptMessagesOutput(imageMessagesOutput, error?.debugMessages);
   }
 }
 
@@ -539,20 +629,20 @@ async function regenerateRewritePrompt() {
     const aiPrompts = await requestAiPrompts(currentParsedResult, {
       target: "rewrite",
       rewriteDirection,
-      imageDirection: getImageDirectionValue(),
+      imageDirection: "",
     });
 
     if (requestId !== rewritePromptRequestSerial) {
       return;
     }
 
-    resultPrompt.value = aiPrompts.rewritePrompt || buildRewritePrompt(currentParsedResult, rewriteDirection);
+    resultPrompt.value = aiPrompts.rewritePrompt || getPromptNotGeneratedText();
   } catch (error) {
     if (requestId !== rewritePromptRequestSerial) {
       return;
     }
 
-    resultPrompt.value = buildRewritePrompt(currentParsedResult, rewriteDirection);
+    resultPrompt.value = getPromptNotGeneratedText();
   } finally {
     if (requestId === rewritePromptRequestSerial) {
       setRegenerateButtonState(regeneratePromptButton, true, "重新生成");
@@ -568,7 +658,7 @@ async function regenerateImagePrompt() {
   const requestId = ++imagePromptRequestSerial;
   const imageDirection = getImageDirectionValue();
   setRegenerateButtonState(regenerateImagePromptButton, false, "正在生成...");
-  resultImagePrompt.value = "正在根据场景迁移方向重新生成，请稍候...";
+  resultImagePrompt.value = "正在调用 AI 重新生成生图提示词模板，请稍候...";
 
   try {
     const aiPrompts = await requestAiPrompts(currentParsedResult, {
@@ -576,20 +666,19 @@ async function regenerateImagePrompt() {
       rewriteDirection: getRewriteDirectionValue(),
       imageDirection,
     });
-
     if (requestId !== imagePromptRequestSerial) {
       return;
     }
 
-    resultImagePrompt.value =
-      aiPrompts.imagePrompt || (await buildImageGenerationPrompt(currentParsedResult, imageDirection));
+    setPromptMessagesOutput(imageMessagesOutput, aiPrompts.debugMessages);
+    resultImagePrompt.value = aiPrompts.imagePrompt || getPromptNotGeneratedText();
   } catch (error) {
     if (requestId !== imagePromptRequestSerial) {
       return;
     }
 
-    resultImagePrompt.value = buildImagePromptFallback(currentParsedResult, imageDirection);
-    void hydrateImageGenerationPromptFallback(currentParsedResult, requestId, imageDirection);
+    resultImagePrompt.value = getPromptNotGeneratedText();
+    setPromptMessagesOutput(imageMessagesOutput, error?.debugMessages);
   } finally {
     if (requestId === imagePromptRequestSerial) {
       setRegenerateButtonState(regenerateImagePromptButton, true, "重新生成");
@@ -755,7 +844,211 @@ function renderImageLinks(urls) {
   });
 }
 
-function buildRewritePrompt(result, direction = "") {
+function buildRewritePromptV2(result, direction = "") {
+  const profile = analyzeNoteProfile(result);
+  const title = String(result?.title || "").trim() || "未识别标题";
+  const body = String(result?.body || "").trim() || "未识别正文";
+  const tags = Array.isArray(result?.tags)
+    ? result.tags.map((tag) => String(tag || "").trim()).filter(Boolean)
+    : [];
+
+  const lines = [
+    "请基于下面这条原笔记，写一份给其他 AI 使用的仿写提示词。",
+    "目标是尽量复刻原笔记的内容骨架、语气、节奏和重点信息，而不是只写通用模板。",
+    "",
+    `原笔记标题：${title}`,
+    `原笔记正文：${body}`,
+    `原笔记标签：${tags.length ? tags.join("、") : "无"}`,
+    "",
+    "请在提示词中明确要求：",
+    "1. 优先复刻原笔记的标题方式、情绪浓度、口语感和记忆点。",
+    "2. 正文要尽量复刻原笔记的叙述顺序、重点信息、细节密度和真实体验感。",
+    "3. 保留原文里明确的偏好、判断、对比、感受和个人表达习惯。",
+    `4. 内容方向定位为：${profile.topicPosition}。`,
+    `5. 内容主体聚焦为：${profile.subjectFocus}。`,
+    `6. 写作类型定位为：${profile.categoryLabel}。`,
+    `7. 结构节奏尽量贴近原笔记：${profile.structureHint}。`,
+    `8. 语气风格尽量贴近原笔记：${profile.toneHint}。`,
+    `9. 重点信息锚点参考：${profile.focusHint}。`,
+    `10. 建议采用的叙述视角：${profile.perspectiveHint}。`,
+    `11. 开头方式参考：${profile.openingHint}。`,
+    `12. 中间段落重点参考：${profile.middleHint}。`,
+    `13. 结尾方式参考：${profile.endingHint}。`,
+    "14. 标题字数不超过18字；如含英文，总长度不超过15字。",
+    "15. 正文字数控制在200-600字内。",
+    "16. 标签数量5-8个，单个标签长度不超过10个字。",
+    "17. 不要套话、空话、总结腔或行业通稿，要像真实用户亲自写的。",
+    "18. 输出结构固定为：【标题策略】【正文结构】【语气风格】【关键信息锚点】【标签策略】【写作限制】。",
+  ];
+
+  if (direction) {
+    lines.push("", `附加方向（权重0.5）：${direction}`);
+    lines.push("附加方向只作为中度调节项，不要推翻原始内容主轴。");
+  }
+
+  lines.push("", "请直接输出可复制使用的仿写提示词正文。");
+  return lines.join("\n");
+}
+
+function buildImagePromptV2(result, profile, scenes, direction = "") {
+  const normalizedScenes = Array.isArray(scenes) && scenes.length
+    ? scenes
+    : [buildSceneProfileFallback(result, profile, 0)];
+
+  return normalizedScenes
+    .map((scene, index) => {
+      const analysis = {
+        style: String(scene?.style || "真实生活方式风格").trim() || "真实生活方式风格",
+        composition: String(scene?.composition || "主体清晰居中").trim() || "主体清晰居中",
+        camera: String(scene?.camera || "自然视角").trim() || "自然视角",
+        background: String(scene?.background || "真实生活场景背景").trim() || "真实生活场景背景",
+        light: String(scene?.light || "自然柔光").trim() || "自然柔光",
+        color: String(scene?.color || "干净克制").trim() || "干净克制",
+        material: String(scene?.material || "真实可感").trim() || "真实可感",
+        mood: String(scene?.mood || "真实自然").trim() || "真实自然",
+        prompt: String(scene?.prompt || "").trim(),
+        negative: String(scene?.negative || "").trim(),
+        params: String(scene?.params || "").trim(),
+        details: String(scene?.details || "").trim(),
+      };
+
+      const templateLines = [
+        `请生成一张写实风格的${profile.subjectFocus}场景图，主体使用变量 ${WORKFLOW_TEMPLATE_VARIABLES.productImageList} 中上传的产品图。`,
+        "画面必须强调真实拍摄质感，看起来像手机或相机真实拍摄，不要像AI插画、3D渲染图或过度精修海报。",
+        "产品主体必须保持原始外形、比例、包装结构和关键材质细节，不要变形，不要替换主体。",
+        "要保留物体边缘轮廓、表面纹理、真实反光、透明度变化，以及水珠、指纹、轻微磨损、接缝等真实细节。",
+        `图片概括：${analysis.prompt || `${analysis.composition}；${analysis.background}；${analysis.mood}`}`,
+        `构图与视角：${analysis.composition}；${analysis.camera}。`,
+        `背景环境：${analysis.background}。`,
+        `光线表现：${analysis.light}。`,
+        `色彩氛围：${analysis.color}。`,
+        `材质质感：${analysis.material}。`,
+        `画面细节：${analysis.details || "保留清晰主体落位空间和前中后景层次。"}。`,
+        `整体氛围：${analysis.mood}。`,
+        "加入真实摄影细节：自然阴影、真实景深、轻微环境噪点、真实高光与反射、不过度完美的生活痕迹。",
+        "不要出现可识别品牌标记、logo、可读文字、额外贴纸、无关文案或明显 AI 痕迹。",
+        "# 图片比例：3:4竖图。",
+        analysis.negative ? `补充约束：${analysis.negative}` : "",
+        analysis.params ? `参数提示：${analysis.params}` : "",
+        direction ? `额外融入以下方向：${direction}` : "",
+      ]
+        .filter(Boolean)
+        .join(" ");
+
+      return [
+        `【图${index + 1}】`,
+        "图片风格与元素分析：",
+        `- 空间风格：${analysis.style}`,
+        `- 核心元素：${analysis.material}${analysis.details ? `；${analysis.details}` : ""}`,
+        `- 光线与色彩：${analysis.light}，${analysis.color}`,
+        `- 构图与视角：${analysis.composition}，${analysis.camera}`,
+        `- 氛围：${analysis.mood}`,
+        analysis.prompt ? `- 图片概括：${analysis.prompt}` : "",
+        "",
+        "可复用 Prompt 模板（支持变量替换）：",
+        "```markdown",
+        templateLines,
+        "```",
+      ].join("\n");
+    })
+    .join("\n\n");
+}
+
+function buildSceneFingerprint(scene) {
+  const style = String(scene?.style || "").trim() || "真实生活方式风格";
+  const composition = String(scene?.composition || "").trim() || "主体清晰居中";
+  const camera = String(scene?.camera || "").trim() || "自然视角";
+  const background = String(scene?.background || "").trim() || "真实生活场景背景";
+  const light = String(scene?.light || "").trim() || "自然柔光";
+  const color = String(scene?.color || "").trim() || "干净克制";
+  const material = String(scene?.material || "").trim() || "真实质感";
+  const mood = String(scene?.mood || "").trim() || "真实自然";
+  const spreadX = Number(scene?.spreadX);
+  const spreadY = Number(scene?.spreadY);
+  const scale =
+    Number.isFinite(spreadX) && Number.isFinite(spreadY)
+      ? (spreadX + spreadY) / 2 <= 0.18
+        ? "近景聚焦"
+        : (spreadX + spreadY) / 2 <= 0.28
+          ? "中近景"
+          : "留白更足"
+      : "中近景";
+
+  return [style, composition, camera, background, light, color, material, mood, scale]
+    .filter(Boolean)
+    .join("；");
+}
+
+function buildImagePromptV2(result, profile, scenes, direction = "") {
+  const normalizedScenes = Array.isArray(scenes) && scenes.length
+    ? scenes
+    : [buildSceneProfileFallback(result, profile, 0)];
+
+  return normalizedScenes
+    .map((scene, index) => {
+      const analysis = {
+        style: String(scene?.style || "真实生活方式风格").trim() || "真实生活方式风格",
+        composition: String(scene?.composition || "主体清晰居中").trim() || "主体清晰居中",
+        camera: String(scene?.camera || "自然视角").trim() || "自然视角",
+        background: String(scene?.background || "真实生活场景背景").trim() || "真实生活场景背景",
+        light: String(scene?.light || "自然柔光").trim() || "自然柔光",
+        color: String(scene?.color || "干净克制").trim() || "干净克制",
+        material: String(scene?.material || "真实质感").trim() || "真实质感",
+        mood: String(scene?.mood || "真实自然").trim() || "真实自然",
+        fingerprint: buildSceneFingerprint(scene),
+        prompt: String(scene?.prompt || "").trim(),
+        negative: String(scene?.negative || "").trim(),
+        params: String(scene?.params || "").trim(),
+        details: String(scene?.details || "").trim(),
+      };
+
+      const whatItShows = buildSimpleImageDescription(result, profile, scene, index);
+
+      return [
+        `【图${index + 1}】`,
+        "图片内容：",
+        `- ${whatItShows}`,
+      ].join("\n");
+    })
+    .join("\n\n");
+}
+
+function buildSimpleImageDescription(result, profile, scene, index) {
+  const title = String(result?.title || "").trim();
+  const body = String(result?.body || "").trim();
+  const sceneText = [
+    String(scene?.style || "").trim(),
+    String(scene?.composition || "").trim(),
+    String(scene?.camera || "").trim(),
+    String(scene?.background || "").trim(),
+    String(scene?.light || "").trim(),
+    String(scene?.color || "").trim(),
+    String(scene?.material || "").trim(),
+    String(scene?.mood || "").trim(),
+  ]
+    .filter(Boolean)
+    .join("，");
+
+  const details = String(scene?.details || "").trim();
+  const prompt = String(scene?.prompt || "").trim();
+  const fallback = `第${index + 1}张图，主要是${profile.subjectFocus}相关的真实场景，画面里有${sceneText || "日常生活场景"}。`;
+
+  if (prompt) {
+    return `${prompt}。${details ? `细节是${details}。` : ""}`;
+  }
+
+  if (sceneText) {
+    return `${sceneText}。${details ? `细节是${details}。` : ""}`;
+  }
+
+  if (title || body) {
+    return `${title || "这张图"}相关的场景图，画面内容是${body || fallback}`;
+  }
+
+  return fallback;
+}
+
+function buildRewritePromptLegacy(result, direction = "") {
   const profile = analyzeNoteProfile(result);
 
   const lines = [
@@ -797,19 +1090,22 @@ function buildRewritePrompt(result, direction = "") {
   return lines.join("\n");
 }
 
+function buildRewritePrompt(result, direction = "") {
+  return buildRewritePromptV2(result, direction);
+}
+
 async function buildImageGenerationPrompt(result, direction = "") {
   const profile = analyzeNoteProfile(result);
   const imageUrls = collectPromptAnalysisImageUrls(result);
-
   if (!imageUrls.length) {
-    return buildImagePromptFallback(result, direction);
+    return buildImagePromptV2(result, profile, [buildSceneProfileFallback(result, profile, 0)], direction);
   }
 
   const scenes = await Promise.all(
     imageUrls.map((imageUrl, index) => analyzePromptImage(imageUrl, result, profile, index))
   );
 
-  return buildSceneTransferTemplateFromScenes(result, profile, scenes, direction);
+  return buildImagePromptV2(result, profile, scenes, direction);
 }
 
 function collectPromptAnalysisImageUrls(result) {
@@ -819,14 +1115,8 @@ function collectPromptAnalysisImageUrls(result) {
 function buildImagePromptFallback(result, direction = "") {
   const profile = analyzeNoteProfile(result);
   const imageCount = Math.max(collectPromptAnalysisImageUrls(result).length, 1);
-  const scenes = Array.from({ length: imageCount }, (_, index) => ({
-    ...buildSceneProfileFallback(result, profile, index),
-    index,
-  }));
-
-  return buildSceneTransferTemplateFromScenes(result, profile, scenes, direction, {
-    isFallback: true,
-  });
+  const scenes = Array.from({ length: imageCount }, (_, index) => buildSceneProfileFallback(result, profile, index));
+  return buildImagePromptV2(result, profile, scenes, direction);
 }
 
 function buildSceneTransferTemplate(result, direction = "") {
@@ -1028,28 +1318,24 @@ function buildSceneTransferStyleBlock(scene, index, theme, vars, direction = "",
 }
 
 function buildSceneTransferFinalPrompt(scene, theme, vars, productRatio, direction = "") {
-  const styleEnglish = mapStyleNameToEnglish(scene);
-  const backgroundEnglish = buildBackgroundPromptEnglish(scene);
-  const lightEnglish = buildLightPromptEnglish(scene);
-  const colorEnglish = buildColorPromptEnglish(scene);
-  const compositionEnglish = buildCompositionPromptEnglish(scene);
-  const materialEnglish = buildMaterialPromptEnglish(scene);
-  const moodEnglish = buildMoodPromptEnglish(scene);
-  const directionEnglish = direction ? `, subtly infused with ${direction}` : "";
+  const directionText = direction ? `，额外融入以下方向：${direction}` : "";
 
   return [
-    `photorealistic ${styleEnglish}${directionEnglish}, featuring the uploaded ${theme.productPromptLabel} from ${vars.productImageList},`,
-    "preserve the product's original shape, proportions, branding, and text details exactly as uploaded,",
-    `${compositionEnglish},`,
-    `${backgroundEnglish},`,
-    `${lightEnglish},`,
-    `${colorEnglish},`,
-    `${materialEnglish},`,
-    `${moodEnglish},`,
-    `product occupies about ${productRatio} of the frame, realistic lifestyle photography, highly detailed, natural texture,`,
-    "no distorted product, no altered brand text, no extra stickers, no unrelated text overlays, no obvious AI artifacts,",
-    "--ar 3:4 --style raw",
-  ].join(" ");
+    `请生成一张写实风格的${theme.productSceneLabel}场景图，主体使用变量 ${vars.productImageList} 中上传的产品图。`,
+    "产品主体必须保持原始外形、比例、包装结构和关键材质细节，不要变形，不要替换主体。",
+    `构图与视角：${scene.composition}，${scene.camera}。`,
+    `背景环境：${scene.background}。`,
+    `光线表现：${scene.light}。`,
+    `色彩氛围：${scene.color}。`,
+    `材质质感：${scene.material}。`,
+    `整体氛围：${scene.mood}。`,
+    `主体在画面中占比约${productRatio}，整体呈现真实生活方式摄影质感，细节清晰，自然真实。`,
+    "不要出现可识别品牌标记、logo、可读文字、额外贴纸、无关文案或明显 AI 痕迹。",
+    "# 图片比例：3:4竖图。",
+    directionText,
+  ]
+    .filter(Boolean)
+    .join(" ");
 }
 
 function buildSceneTransferAnalysisSummary(scene, theme, styleName) {
@@ -1106,7 +1392,7 @@ function buildSceneTransferPromptParams(scene) {
 function buildSceneTransferPromptNegative(scene) {
   const base = [
     "避免产品主体变形或比例失真",
-    "避免品牌与文字信息被改写或糊掉",
+    "避免出现可识别品牌标记、商标图形或清晰文字",
     "避免光线失真和明显 AI 拼接感",
   ];
 
@@ -1343,7 +1629,7 @@ function buildSceneTransferUnifiedTone(theme, direction = "", options = {}) {
 }
 
 function buildSceneTransferImageHeading(index) {
-  return `【图${numberToChineseText(index)}】`;
+  return `图片${index}：\n# 图片比例：3:4竖图\n---`;
 }
 
 function numberToChineseText(value) {
@@ -2011,13 +2297,14 @@ function describeVisualMood(visual) {
 
 function buildVisualReplicaPrompt(scene) {
   return [
-    "将主体产品自然融入一个真实生活方式场景中，",
+    "将主体产品自然融入一个真实生活方式场景中，整体必须像真实拍摄照片而不是AI合成图，",
     `${scene.composition}，${scene.camera}，`,
     `空间环境为${scene.background}，`,
     `光线表现为${scene.light}，`,
     `整体配色${scene.color}，`,
     `重点呈现${scene.material}，`,
     `${scene.details}`,
+    "并保留物体边缘轮廓、表面纹理、真实反光、透明度变化、轻微水汽或磨损等细节，",
     `整体氛围${scene.mood}，`,
     "输出真实自然、层次清楚、可直接用于最终产品场景迁移成图的高质量画面。",
   ].join("");
@@ -2032,6 +2319,8 @@ function buildVisualNegativePrompt(visual) {
     "不要文字乱码",
     "不要塑料感CG",
     "不要过度磨皮",
+    "不要过度AI味、过度完美、过度光滑",
+    "不要材质失真、边缘发虚、细节糊掉",
   ];
 
   if (visual.isNight) {
@@ -2056,7 +2345,7 @@ function buildVisualParamHint(visual) {
   const ratio = inferAspectRatioLabel(visual.aspectRatio);
   const depth = visual.depthContrast >= 1.18 ? "浅到中景深" : "中等景深";
   const lightProtection = visual.isNight ? "暗部细节优先" : "高光保护优先";
-  return `画幅 ${ratio}，写实强度中高，${depth}，${lightProtection}，清晰度优先。`;
+  return `画幅 ${ratio}，写实强度中高，${depth}，${lightProtection}，真实摄影质感优先，物体细节优先。`;
 }
 
 function inferAspectRatioLabel(aspectRatio) {

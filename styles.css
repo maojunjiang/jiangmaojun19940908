@@ -454,7 +454,7 @@ img {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 18px;
-  align-items: start;
+  align-items: stretch;
 }
 
 .tools-block-wide {
@@ -711,21 +711,26 @@ img {
 }
 
 .result-block-links {
-  height: 320px;
+  min-height: 420px;
+  height: auto;
 }
 
 .result-block-prompt {
-  height: 320px;
+  min-height: 420px;
+  height: auto;
 }
 
 .result-block-image-prompt {
-  height: 286px;
+  min-height: 400px;
+  height: auto;
 }
 
 .tools-block {
   min-height: 0;
+  height: 100%;
   max-height: none;
   resize: vertical;
+  overflow: auto;
 }
 
 .result-block-head {
@@ -830,13 +835,20 @@ img {
 
 .prompt-block-body {
   min-height: 0;
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  display: flex;
+  flex-direction: column;
   gap: 12px;
 }
 
 .prompt-direction-group {
-  display: grid;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.prompt-debug-group {
+  display: flex;
+  flex-direction: column;
   gap: 8px;
 }
 
@@ -850,7 +862,9 @@ img {
 .prompt-direction-input {
   width: 100%;
   min-height: 84px;
+  height: auto;
   resize: vertical;
+  overflow: auto;
   border: 1px solid var(--border-color);
   border-radius: 16px;
   padding: 12px 14px;
@@ -869,9 +883,10 @@ img {
 
 .prompt-editor {
   width: 100%;
-  min-height: 0;
-  height: 100%;
-  resize: none;
+  min-height: 180px;
+  height: auto;
+  resize: vertical;
+  overflow: auto;
   border: 1px solid var(--border-color);
   border-radius: 18px;
   padding: 16px 18px;
@@ -880,6 +895,13 @@ img {
   line-height: 1.7;
   color: var(--text-primary);
   background: rgba(250, 250, 250, 0.92);
+}
+
+.prompt-debug-output {
+  min-height: 220px;
+  font-size: 0.8rem;
+  line-height: 1.6;
+  white-space: pre;
 }
 
 .prompt-editor:focus {
@@ -1035,11 +1057,16 @@ img {
   }
 
   .result-block-links {
-    height: 280px;
+    min-height: 380px;
+    height: auto;
   }
 
   .result-block-prompt {
-    height: 280px;
+    min-height: 380px;
+  }
+
+  .result-block-image-prompt {
+    min-height: 360px;
   }
 
   .carousel-overlay {

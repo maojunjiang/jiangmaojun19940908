@@ -8,13 +8,17 @@ loadLocalEnvFiles();
 const HOST = "127.0.0.1";
 const PORT = process.env.PORT || 3000;
 const ROOT = __dirname;
+const AI_PROVIDER = String(process.env.AI_PROVIDER || "ark").trim().toLowerCase();
 const AI_API_BASE_URL = String(process.env.AI_API_BASE_URL || "").trim();
 const AI_API_TOKEN = String(process.env.AI_API_TOKEN || "").trim();
-const AI_API_MODEL = String(process.env.AI_API_MODEL || "").trim();
-const AI_API_ENTERPRISE_ID = String(process.env.AI_API_ENTERPRISE_ID || "136").trim();
+const AI_API_MODEL = String(process.env.AI_API_MODEL || "doubao-seed-2-0-pro-260215").trim();
 const AI_CHAT_COMPLETIONS_PATH = String(
-  process.env.AI_CHAT_COMPLETIONS_PATH || "/api/agent/doubao_generate_character_wf"
+  process.env.AI_CHAT_COMPLETIONS_PATH || "/api/v3/chat/completions"
 ).trim();
+const GROBOTAI_PROMPT_PATH = String(
+  process.env.GROBOTAI_PROMPT_PATH || "/api/agent/doubao_generate_character_wf"
+).trim();
+const GROBOTAI_ENTERPRISE_ID = String(process.env.GROBOTAI_ENTERPRISE_ID || "").trim();
 const AI_REQUEST_TIMEOUT_MS = Number.parseInt(process.env.AI_REQUEST_TIMEOUT_MS || "90000", 10);
 
 const MIME_TYPES = {
@@ -139,6 +143,7 @@ async function handlePromptGeneration(req, res) {
   } catch (error) {
     writeJson(res, 502, {
       error: error instanceof Error ? error.message : "AI 提示词生成失败。",
+      debugMessages: Array.isArray(error?.debugMessages) ? error.debugMessages : [],
     });
   }
 }
@@ -288,7 +293,6 @@ async function tryProxyParse(noteUrl) {
       return null;
     }
 
-    const rawText = await response.text();
     if (!rawText.trim()) {
       return null;
     }
@@ -307,13 +311,154 @@ function normalizePromptTarget(target) {
   return target === "rewrite" || target === "image" ? target : "all";
 }
 
+function buildAiSystemPromptV2(target) {
+  const lines = [
+    "你是一个把小红书笔记整理成可复用提示词的助手。",
+    "任务是忠实提炼原文与参考图中的表达方式，不要泛化成空洞行业模板。",
+    "输出只允许 JSON，不要添加解释、前言或备注。",
+  ];
+
+  if (target === "rewrite") {
+    lines.push('只输出 {"rewrite_prompt":"..."}。');
+    lines.push("rewrite_prompt 必须按以下结构组织：标题策略、正文结构、语气风格、关键信息锚点、标签策略、写作限制。");
+    lines.push("写作限制固定保留：标题不超过18字；正文200-600字；标签5-8个，单个标签不超过10个字。");
+  } else if (target === "image") {
+    lines.push('只输出 {"image_prompt":"..."}。');
+    lines.push("image_prompt 必须按图片逐张输出，每张图都包含：图片内容概括、图片风格与元素分析、可复用 Prompt 模板、负面提示、参数建议。");
+    lines.push("每张图的分析都必须尽可能具体，不能只写空泛风格词，必须写清场景空间、主体位置、景别机位、前中后景、光线来源、色彩层次、材质触感、道具元素、文字版式、留白与氛围。");
+    lines.push("最终模板必须能让其他 AI 最大程度复刻参考图，不允许偷懒简写成一句概括。");
+    lines.push("必须明确强调真实拍摄质感、真实镜头语言、真实材质纹理、真实使用痕迹和真实环境细节，避免AI感、CG感、塑料感、过度光滑和过度完美。");
+    lines.push("模板必须直接使用产品图变量，并明确保留产品外形、比例、品牌与文字信息。");
+    lines.push("每张图都要显式写出 # 图片比例：3:4竖图。");
+  } else {
+    lines.push('同时输出 {"rewrite_prompt":"...","image_prompt":"..."}。');
+    lines.push("rewrite_prompt 负责复刻内容表达，image_prompt 负责复刻参考图视觉。");
+  }
+
+  return lines.join("\n");
+}
+
+function buildAiUserContentV2(result, imageUrls, options = {}) {
+  const title = String(result?.title || "").trim();
+  const body = String(result?.body || "").trim();
+  const tags = Array.isArray(result?.tags)
+    ? result.tags.map((tag) => String(tag || "").trim()).filter(Boolean)
+    : [];
+  const imageAnalyses = Array.isArray(result?.imageAnalyses) ? result.imageAnalyses : [];
+  const target = normalizePromptTarget(options.target);
+  const includeImageContext = target !== "rewrite";
+  const rewriteDirection =
+    typeof options.rewriteDirection === "string" ? options.rewriteDirection.trim() : "";
+  const imageDirection =
+    includeImageContext && typeof options.imageDirection === "string"
+      ? options.imageDirection.trim()
+      : "";
+
+  const lines = [
+    `生成目标：${
+      target === "rewrite"
+        ? "仅生成仿写提示词"
+        : target === "image"
+          ? "仅生成场景迁移提示词"
+          : "同时生成仿写提示词和场景迁移提示词"
+    }`,
+    `原笔记标题：${title || "-"}`,
+    `原笔记正文：${body || "-"}`,
+    `原笔记标签：${tags.length ? tags.join("、") : "-"}`,
+    "",
+    "请优先提炼原文的表达顺序、重点信息、语气和情绪节奏，不要只抽象成泛化分类。",
+  ];
+
+  if (includeImageContext) {
+    lines.splice(4, 0, `参考图数量：${imageUrls.length}`);
+  }
+
+  if (rewriteDirection) {
+    lines.push(`仿写附加方向（权重0.5）：${rewriteDirection}`);
+  }
+
+  if (imageDirection) {
+    lines.push(`场景迁移附加方向（权重0.5）：${imageDirection}`);
+  }
+
+  if (includeImageContext && imageAnalyses.length && (target === "image" || target === "all")) {
+    lines.push("", "图片分析（逐张对应）：");
+    imageAnalyses.forEach((item, index) => {
+      const label = String(item?.imageLabel || `图片${index + 1}`).trim();
+      lines.push(
+        "",
+        `${label}：`,
+        `- 风格：${String(item?.style || "").trim() || "-"}`,
+        `- 构图：${String(item?.composition || "").trim() || "-"}`,
+        `- 视角：${String(item?.camera || "").trim() || "-"}`,
+        `- 背景：${String(item?.background || "").trim() || "-"}`,
+        `- 光线：${String(item?.light || "").trim() || "-"}`,
+        `- 色彩：${String(item?.color || "").trim() || "-"}`,
+        `- 材质：${String(item?.material || "").trim() || "-"}`,
+        `- 细节：${String(item?.details || "").trim() || "-"}`,
+        `- 文字与版式：${String(item?.typography || "").trim() || "-"}`,
+        `- 氛围：${String(item?.mood || "").trim() || "-"}`,
+        `- 复刻概括：${String(item?.prompt || "").trim() || "-"}`,
+        `- 负面约束：${String(item?.negative || "").trim() || "-"}`,
+        `- 参数建议：${String(item?.params || "").trim() || "-"}`,
+        `- 主体横向占比：${Number.isFinite(item?.spreadX) ? item.spreadX.toFixed(2) : "-"}`,
+        `- 主体纵向占比：${Number.isFinite(item?.spreadY) ? item.spreadY.toFixed(2) : "-"}`
+      );
+    });
+  }
+
+  lines.push("", "输出要求：");
+
+  if (target === "rewrite") {
+    lines.push("- 只输出 rewrite_prompt，不要输出 image_prompt。");
+    lines.push("- rewrite_prompt 直接写成给其他 AI 使用的仿写提示词，不要写成新笔记。");
+    lines.push("- 不要出现图片分析、成图说明、镜头语言、画面风格等图片相关内容。");
+  } else if (target === "image") {
+    lines.push("- 只输出 image_prompt，不要输出 rewrite_prompt。");
+    lines.push("- image_prompt 直接写成给其他 AI 使用的成图提示词，不要写成图片说明。");
+    lines.push("- 每张图都要先用 6-10 条 bullet 细拆参考图，再给出一段高还原度、可直接复制的完整成图提示词。");
+    lines.push("- 完整成图提示词必须覆盖：主体摆放、场景空间、镜头景别、机位角度、背景层次、道具元素、光线来源、颜色关系、材质表面、氛围关键词、文字处理、负面限制、参数建议。");
+    lines.push("- 必须把“真实拍摄”写进模板，例如真实摄影、手机/相机实拍、自然镜头、轻微景深、真实噪点、真实反光、真实阴影、真实磨损或水汽等细节。");
+    lines.push("- 必须把“物体细节”写进模板，例如边缘轮廓、表面纹理、反光方式、透明度、褶皱、接缝、刻字、瓶口、杯盖、吸管、水珠、指纹、磨砂或高光质感。");
+    lines.push("- 负面提示要明确排除：AI感过强、CG渲染感、塑料假面、错误结构、细节糊掉、边缘发虚、材质失真、过度锐化、过度磨皮、画面假干净。");
+    lines.push("- 如果参考图信息很少，也要尽量把能观察到的细节写具体，不要退化成简单通用模板。");
+  } else {
+    lines.push("- rewrite_prompt 直接写成给其他 AI 使用的仿写提示词，不要写成新笔记。");
+    lines.push("- image_prompt 直接写成给其他 AI 使用的成图提示词，不要写成图片说明。");
+  }
+
+  lines.push("- 输出内容要结构清晰、可复制、可直接投喂。");
+
+  const textBlock = lines.join("\n");
+
+  if (!includeImageContext || !imageUrls.length) {
+    return textBlock;
+  }
+
+  return [
+    {
+      type: "text",
+      text: textBlock,
+    },
+    ...imageUrls.map((imageUrl) => ({
+      type: "image_url",
+      image_url: {
+        url: imageUrl,
+      },
+    })),
+  ];
+}
+
 async function generatePromptsWithAi(result, options = {}) {
+  if (AI_PROVIDER === "grobotai") {
+    return generatePromptsWithGrobotai(result, options);
+  }
+
   const endpointUrl = buildAiEndpointUrl();
   const imageUrls = collectAiImageUrls(result);
   const target = normalizePromptTarget(options.target);
   const payload = {
     temperature: 0.2,
-    response_format: buildAiResponseFormat(target),
     messages: [
       {
         role: "system",
@@ -331,16 +476,54 @@ async function generatePromptsWithAi(result, options = {}) {
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), AI_REQUEST_TIMEOUT_MS);
+  const responseFormats = buildAiResponseFormatCandidates(target);
 
   try {
-    const response = await fetch(endpointUrl, {
-      method: "POST",
-      headers: buildAiRequestHeaders(),
-      body: JSON.stringify(payload),
-      signal: controller.signal,
-    });
+    let lastError = null;
 
-    const rawText = await response.text();
+    for (const responseFormat of responseFormats) {
+      const requestPayload = { ...payload };
+      if (responseFormat) {
+        requestPayload.response_format = responseFormat;
+      }
+
+      const response = await fetch(endpointUrl, {
+        method: "POST",
+        headers: buildAiRequestHeaders(),
+        body: JSON.stringify(requestPayload),
+        signal: controller.signal,
+      });
+
+      const rawText = await response.text();
+      if (!response.ok) {
+        const error = new Error(
+          `AI request failed: ${response.status} ${truncateErrorText(rawText)}`
+        );
+
+        if (shouldRetryWithoutStructuredOutput(response.status, rawText)) {
+          lastError = error;
+          continue;
+        }
+
+        throw error;
+      }
+
+      const parsed = parseAiResponsePayload(rawText);
+      const content = extractAiMessageContent(parsed);
+      const promptJson = parseAiJsonContent(content);
+
+      return {
+        rewritePrompt:
+          target === "image" ? "" : formatRewritePromptOutput(promptJson.rewrite_prompt),
+        imagePrompt:
+          target === "rewrite" ? "" : formatImagePromptOutput(promptJson.image_prompt),
+        debugMessages: payload.messages,
+      };
+    }
+
+    throw lastError || new Error("AI prompt generation failed.");
+    /*
+
     if (!response.ok) {
       throw new Error(`AI 接口返回异常：${response.status} ${truncateErrorText(rawText)}`);
     }
@@ -355,6 +538,89 @@ async function generatePromptsWithAi(result, options = {}) {
       imagePrompt:
         target === "rewrite" ? "" : formatImagePromptOutput(promptJson.image_prompt),
     };
+    */
+  } catch (error) {
+    if (error && typeof error === "object") {
+      error.debugMessages = payload.messages;
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+async function generatePromptsWithGrobotai(result, options = {}) {
+  const endpointUrl = buildGrobotaiPromptUrl();
+  const imageUrls = collectAiImageUrls(result);
+  const target = normalizePromptTarget(options.target);
+  const payload = {
+    messages: [
+      {
+        role: "system",
+        content: buildAiSystemPrompt(target),
+      },
+      {
+        role: "user",
+        content: buildAiUserContent(result, imageUrls, options),
+      },
+    ],
+    model: AI_API_MODEL,
+    temperature: 0.2,
+  };
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), AI_REQUEST_TIMEOUT_MS);
+  const responseFormats = buildAiResponseFormatCandidates(target);
+
+  try {
+    let lastError = null;
+
+    for (const responseFormat of responseFormats) {
+      const requestPayload = { ...payload };
+      if (responseFormat) {
+        requestPayload.response_format = responseFormat;
+      }
+
+      const response = await fetch(endpointUrl, {
+        method: "POST",
+        headers: buildGrobotaiRequestHeaders(),
+        body: JSON.stringify(requestPayload),
+        signal: controller.signal,
+      });
+
+      const rawText = await response.text();
+      if (!response.ok) {
+        const error = new Error(
+          `AI request failed: ${response.status} ${truncateErrorText(rawText)}`
+        );
+
+        if (shouldRetryWithoutStructuredOutput(response.status, rawText)) {
+          lastError = error;
+          continue;
+        }
+
+        throw error;
+      }
+
+      const parsed = parseAiResponsePayload(rawText);
+      const content = extractAiMessageContent(parsed);
+      const promptJson = parseAiJsonContent(content);
+
+      return {
+        rewritePrompt:
+          target === "image" ? "" : formatRewritePromptOutput(promptJson.rewrite_prompt),
+        imagePrompt:
+          target === "rewrite" ? "" : formatImagePromptOutput(promptJson.image_prompt),
+        debugMessages: payload.messages,
+      };
+    }
+
+    throw lastError || new Error("AI prompt generation failed.");
+  } catch (error) {
+    if (error && typeof error === "object") {
+      error.debugMessages = payload.messages;
+    }
+    throw error;
   } finally {
     clearTimeout(timeoutId);
   }
@@ -364,17 +630,29 @@ function buildAiEndpointUrl() {
   return new URL(AI_CHAT_COMPLETIONS_PATH, AI_API_BASE_URL).toString();
 }
 
+function buildGrobotaiPromptUrl() {
+  return new URL(GROBOTAI_PROMPT_PATH, AI_API_BASE_URL).toString();
+}
+
 function buildAiRequestHeaders() {
   const headers = {
-    Accept: "text/event-stream, application/json",
+    Accept: "application/json, text/event-stream",
     Authorization: buildAuthorizationHeader(AI_API_TOKEN),
     "Content-Type": "application/json",
-    "wf-exe-id": createWorkflowExecutionId(),
-    "task-id": createTaskId(),
   };
 
-  if (AI_API_ENTERPRISE_ID) {
-    headers["enterprise-id"] = AI_API_ENTERPRISE_ID;
+  return headers;
+}
+
+function buildGrobotaiRequestHeaders() {
+  const headers = {
+    Accept: "application/json, text/event-stream",
+    Authorization: buildAuthorizationHeader(AI_API_TOKEN),
+    "Content-Type": "application/json",
+  };
+
+  if (GROBOTAI_ENTERPRISE_ID) {
+    headers["enterprise-id"] = GROBOTAI_ENTERPRISE_ID;
   }
 
   return headers;
@@ -387,14 +665,6 @@ function buildAuthorizationHeader(token) {
   }
 
   return /^Bearer\s+/i.test(normalized) ? normalized : `Bearer ${normalized}`;
-}
-
-function createWorkflowExecutionId() {
-  return `codex_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
-}
-
-function createTaskId() {
-  return `codex-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
 function collectAiImageUrls(result) {
@@ -458,7 +728,11 @@ function normalizeMediaUrlForAi(sourceUrl) {
   return `${cleanUrl.origin}${cleanUrl.pathname}${query ? `?${query}` : ""}`;
 }
 
-function buildAiResponseFormat(target) {
+function buildAiResponseFormatCandidates(target) {
+  return [buildAiJsonSchemaResponseFormat(target), { type: "json_object" }, null];
+}
+
+function buildAiJsonSchemaResponseFormat(target) {
   const properties = {};
   const required = [];
 
@@ -495,7 +769,21 @@ function buildAiResponseFormat(target) {
   };
 }
 
-function buildAiSystemPrompt(target) {
+function shouldRetryWithoutStructuredOutput(status, rawText) {
+  if (status !== 400) {
+    return false;
+  }
+
+  const normalized = String(rawText || "").toLowerCase();
+  return (
+    normalized.includes("response_format") ||
+    normalized.includes("json_schema") ||
+    normalized.includes("json_object") ||
+    normalized.includes("invalidparameter")
+  );
+}
+
+function buildAiSystemPromptLegacy(target) {
   const vars = WORKFLOW_TEMPLATE_VARIABLES;
   const lines = [
     "你是一名资深小红书内容策划 + 资深视觉导演 + 文生图提示词专家。",
@@ -548,7 +836,31 @@ function buildAiSystemPrompt(target) {
   return lines.join("\n");
 }
 
-function buildAiUserContent(result, imageUrls, options = {}) {
+function buildAiSystemPromptLegacy(target) {
+  const vars = WORKFLOW_TEMPLATE_VARIABLES;
+  const lines = [
+    "你是一名擅长分析小红书图文内容并生成可复用提示词的助手。",
+    "请基于给定标题、正文、标签和图片完成任务。",
+    "输出必须是 JSON，且不要输出任何额外解释。",
+  ];
+
+  if (target === "rewrite") {
+    lines.push('只输出仿写提示词，JSON 结构为：{"rewrite_prompt":"..."}');
+  } else if (target === "image") {
+    lines.push('只输出场景迁移提示词，JSON 结构为：{"image_prompt":"..."}');
+    lines.push("场景迁移提示词需要按图片逐张分析，并给出可直接复用的最终成图 prompt。");
+    lines.push(`最终 prompt 中必须直接使用产品图变量 ${vars.productImageList}。`);
+  } else {
+    lines.push(
+      '同时输出仿写提示词和场景迁移提示词，JSON 结构为：{"rewrite_prompt":"...","image_prompt":"..."}'
+    );
+    lines.push(`场景迁移 prompt 中必须直接使用产品图变量 ${vars.productImageList}。`);
+  }
+
+  return lines.join("\n");
+}
+
+function buildAiUserContentLegacy(result, imageUrls, options = {}) {
   const title = String(result?.title || "").trim();
   const body = String(result?.body || "").trim();
   const tags = Array.isArray(result?.tags) ? result.tags.map((tag) => String(tag || "").trim()).filter(Boolean) : [];
@@ -610,6 +922,70 @@ function buildAiUserContent(result, imageUrls, options = {}) {
       },
     })),
   ];
+}
+
+function buildAiUserContentLegacyV2(result, imageUrls, options = {}) {
+  const title = String(result?.title || "").trim();
+  const body = String(result?.body || "").trim();
+  const tags = Array.isArray(result?.tags)
+    ? result.tags.map((tag) => String(tag || "").trim()).filter(Boolean)
+    : [];
+  const target = normalizePromptTarget(options.target);
+  const rewriteDirection =
+    typeof options.rewriteDirection === "string" ? options.rewriteDirection.trim() : "";
+  const imageDirection =
+    typeof options.imageDirection === "string" ? options.imageDirection.trim() : "";
+
+  const lines = [
+    `生成目标：${
+      target === "rewrite"
+        ? "仅生成仿写提示词"
+        : target === "image"
+          ? "仅生成场景迁移提示词"
+          : "同时生成仿写提示词和场景迁移提示词"
+    }`,
+    `标题：${title || "-"}`,
+    `正文：${body || "-"}`,
+    `标签：${tags.length ? tags.join("、") : "-"}`,
+    `参考图数量：${imageUrls.length}`,
+  ];
+
+  if (rewriteDirection) {
+    lines.push(`仿写提示词方向：${rewriteDirection}`);
+  }
+
+  if (imageDirection) {
+    lines.push(`场景迁移提示词方向：${imageDirection}`);
+  }
+
+  lines.push("", "请结合以上信息和附带图片直接完成输出。");
+
+  const textBlock = lines.join("\n");
+
+  if (!imageUrls.length) {
+    return textBlock;
+  }
+
+  return [
+    {
+      type: "text",
+      text: textBlock,
+    },
+    ...imageUrls.map((imageUrl) => ({
+      type: "image_url",
+      image_url: {
+        url: imageUrl,
+      },
+    })),
+  ];
+}
+
+function buildAiSystemPrompt(target) {
+  return buildAiSystemPromptV2(target);
+}
+
+function buildAiUserContent(result, imageUrls, options = {}) {
+  return buildAiUserContentV2(result, imageUrls, options);
 }
 
 function buildSceneTransferTemplateDynamicExample(result, direction = "") {
@@ -964,16 +1340,32 @@ function extractAiMessageContent(payload) {
 }
 
 function parseAiJsonContent(content) {
+  const normalizePromptJson = (value) => {
+    if (!value || typeof value !== "object") {
+      return value;
+    }
+
+    if (typeof value.rewrite_prompt !== "string" && typeof value.rewritten_prompt === "string") {
+      value.rewrite_prompt = value.rewritten_prompt;
+    }
+
+    if (typeof value.image_prompt !== "string" && typeof value.imagePrompt === "string") {
+      value.image_prompt = value.imagePrompt;
+    }
+
+    return value;
+  };
+
   if (content && typeof content === "object") {
-    return content;
+    return normalizePromptJson(content);
   }
 
   try {
-    return JSON.parse(content);
+    return normalizePromptJson(JSON.parse(content));
   } catch (error) {
     const matched = content.match(/\{[\s\S]*\}/);
     if (matched) {
-      return JSON.parse(matched[0]);
+      return normalizePromptJson(JSON.parse(matched[0]));
     }
 
     throw new Error("AI 返回内容不是合法 JSON。");
@@ -1002,6 +1394,7 @@ function formatImagePromptOutput(value) {
   formatted = formatted.replace(/\s*(====================)/g, "\n\n$1\n");
   formatted = formatted.replace(/\s*(以下仅作为风格参考)/g, "\n$1\n");
   formatted = formatted.replace(/\s*(【图[一二三四五六七八九十]+】)/g, "\n\n====================\n$1\n");
+  formatted = formatted.replace(/\s*(图片\d+：\s*---)/g, "\n\n$1\n");
   formatted = formatted.replace(/\s*(🌿\s*图片风格与元素分析)/g, "\n$1\n");
   formatted = formatted.replace(/\s*(✍️\s*可复用 Prompt 模板（支持变量替换）)/g, "\n\n$1\n");
   formatted = formatted.replace(/\s*(---)/g, "\n\n$1\n");

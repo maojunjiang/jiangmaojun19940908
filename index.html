@@ -10,7 +10,7 @@
       href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700;800&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="./styles.css?v=20260319-1" />
+    <link rel="stylesheet" href="./styles.css?v=20260319-2" />
   </head>
   <body>
     <div class="page-shell">
@@ -108,7 +108,7 @@
 
             <div class="result-block result-block-prompt tools-block">
               <div class="result-block-head">
-                <span class="result-label">仿写提示词</span>
+              <span class="result-label">生文提示词模板</span>
                 <div class="result-block-actions">
                   <button type="button" id="regenerate-prompt-button" class="copy-button">
                     重新生成
@@ -134,12 +134,21 @@
                   class="prompt-editor result-content-scroll"
                   spellcheck="false"
                 >-</textarea>
+                <div class="prompt-debug-group">
+                  <label class="prompt-direction-label" for="rewrite-messages-output">发送给模型的 messages</label>
+                  <textarea
+                    id="rewrite-messages-output"
+                    class="prompt-editor prompt-debug-output result-content-scroll"
+                    readonly
+                    spellcheck="false"
+                  >-</textarea>
+                </div>
               </div>
             </div>
 
               <div class="result-block result-block-image-prompt tools-block tools-block-wide">
                 <div class="result-block-head">
-                  <span class="result-label">场景迁移 Prompt</span>
+              <span class="result-label">生图提示词模板</span>
                   <div class="result-block-actions">
                     <button type="button" id="regenerate-image-prompt-button" class="copy-button">
                       重新生成
@@ -165,6 +174,15 @@
                   class="prompt-editor result-content-scroll"
                   spellcheck="false"
                 >-</textarea>
+                <div class="prompt-debug-group">
+                  <label class="prompt-direction-label" for="image-messages-output">发送给模型的 messages</label>
+                  <textarea
+                    id="image-messages-output"
+                    class="prompt-editor prompt-debug-output result-content-scroll"
+                    readonly
+                    spellcheck="false"
+                  >-</textarea>
+                </div>
               </div>
             </div>
           </div>
@@ -234,6 +252,6 @@
       </main>
     </div>
 
-    <script src="./script.js?v=20260319-3"></script>
+    <script src="./script.js?v=20260320-2"></script>
   </body>
 </html>
