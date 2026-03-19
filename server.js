@@ -3,9 +3,19 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { URL } = require("node:url");
 
+loadLocalEnvFiles();
+
 const HOST = "127.0.0.1";
 const PORT = process.env.PORT || 3000;
 const ROOT = __dirname;
+const AI_API_BASE_URL = String(process.env.AI_API_BASE_URL || "").trim();
+const AI_API_TOKEN = String(process.env.AI_API_TOKEN || "").trim();
+const AI_API_MODEL = String(process.env.AI_API_MODEL || "").trim();
+const AI_API_ENTERPRISE_ID = String(process.env.AI_API_ENTERPRISE_ID || "136").trim();
+const AI_CHAT_COMPLETIONS_PATH = String(
+  process.env.AI_CHAT_COMPLETIONS_PATH || "/api/agent/doubao_generate_character_wf"
+).trim();
+const AI_REQUEST_TIMEOUT_MS = Number.parseInt(process.env.AI_REQUEST_TIMEOUT_MS || "90000", 10);
 
 const MIME_TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -30,6 +40,11 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === "POST" && requestUrl.pathname === "/api/parse") {
       await handleParse(req, res);
+      return;
+    }
+
+    if (req.method === "POST" && requestUrl.pathname === "/api/prompts") {
+      await handlePromptGeneration(req, res);
       return;
     }
 
@@ -82,6 +97,32 @@ async function handleParse(req, res) {
     writeJson(res, 502, {
       error: error instanceof Error ? error.message : "解析失败。",
       fallback: buildClientResult(buildFallbackResult(noteUrl, "")),
+    });
+  }
+}
+
+async function handlePromptGeneration(req, res) {
+  if (!isAiPromptConfigured()) {
+    writeJson(res, 503, {
+      error: "AI 服务尚未配置，请补充 AI_API_BASE_URL 和 AI_API_TOKEN。",
+    });
+    return;
+  }
+
+  const body = await readJsonBody(req);
+  const result = body?.result;
+
+  if (!result || typeof result !== "object") {
+    writeJson(res, 400, { error: "缺少 result 参数。" });
+    return;
+  }
+
+  try {
+    const prompts = await generatePromptsWithAi(result);
+    writeJson(res, 200, prompts);
+  } catch (error) {
+    writeJson(res, 502, {
+      error: error instanceof Error ? error.message : "AI 提示词生成失败。",
     });
   }
 }
@@ -145,6 +186,49 @@ async function readJsonBody(req) {
   return JSON.parse(raw);
 }
 
+function loadLocalEnvFiles() {
+  const candidates = [".env.local", ".env"];
+
+  for (const filename of candidates) {
+    const filePath = path.join(__dirname, filename);
+    if (!fs.existsSync(filePath)) {
+      continue;
+    }
+
+    const source = fs.readFileSync(filePath, "utf8");
+    source.split(/\r?\n/).forEach((line) => {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) {
+        return;
+      }
+
+      const separatorIndex = trimmed.indexOf("=");
+      if (separatorIndex <= 0) {
+        return;
+      }
+
+      const key = trimmed.slice(0, separatorIndex).trim();
+      if (!key || process.env[key]) {
+        return;
+      }
+
+      const rawValue = trimmed.slice(separatorIndex + 1).trim();
+      process.env[key] = stripEnvWrappingQuotes(rawValue);
+    });
+  }
+}
+
+function stripEnvWrappingQuotes(value) {
+  if (
+    (value.startsWith('"') && value.endsWith('"')) ||
+    (value.startsWith("'") && value.endsWith("'"))
+  ) {
+    return value.slice(1, -1);
+  }
+
+  return value;
+}
+
 function normalizeUrl(value) {
   const completed = /^https?:\/\//i.test(value) ? value : `https://${value}`;
   return new URL(completed).toString();
@@ -197,6 +281,374 @@ async function tryProxyParse(noteUrl) {
   } catch (error) {
     return null;
   }
+}
+
+function isAiPromptConfigured() {
+  return Boolean(AI_API_BASE_URL && AI_API_TOKEN);
+}
+
+async function generatePromptsWithAi(result) {
+  const endpointUrl = buildAiEndpointUrl();
+  const imageUrls = collectAiImageUrls(result);
+  const payload = {
+    temperature: 0.2,
+    response_format: buildAiResponseFormat(),
+    messages: [
+      {
+        role: "system",
+        content: buildAiSystemPrompt(),
+      },
+      {
+        role: "user",
+        content: buildAiUserContent(result, imageUrls),
+      },
+    ],
+  };
+  if (AI_API_MODEL) {
+    payload.model = AI_API_MODEL;
+  }
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), AI_REQUEST_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(endpointUrl, {
+      method: "POST",
+      headers: buildAiRequestHeaders(),
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+
+    const rawText = await response.text();
+    if (!response.ok) {
+      throw new Error(`AI 接口返回异常：${response.status} ${truncateErrorText(rawText)}`);
+    }
+
+    const parsed = parseAiResponsePayload(rawText);
+    const content = extractAiMessageContent(parsed);
+    const promptJson = parseAiJsonContent(content);
+
+    return {
+      rewritePrompt:
+        typeof promptJson.rewrite_prompt === "string" && promptJson.rewrite_prompt.trim()
+          ? promptJson.rewrite_prompt.trim()
+          : "",
+      imagePrompt:
+        typeof promptJson.image_prompt === "string" && promptJson.image_prompt.trim()
+          ? promptJson.image_prompt.trim()
+          : "",
+    };
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+function buildAiEndpointUrl() {
+  return new URL(AI_CHAT_COMPLETIONS_PATH, AI_API_BASE_URL).toString();
+}
+
+function buildAiRequestHeaders() {
+  const headers = {
+    Accept: "text/event-stream, application/json",
+    Authorization: buildAuthorizationHeader(AI_API_TOKEN),
+    "Content-Type": "application/json",
+    "wf-exe-id": createWorkflowExecutionId(),
+    "task-id": createTaskId(),
+  };
+
+  if (AI_API_ENTERPRISE_ID) {
+    headers["enterprise-id"] = AI_API_ENTERPRISE_ID;
+  }
+
+  return headers;
+}
+
+function buildAuthorizationHeader(token) {
+  const normalized = String(token || "").trim();
+  if (!normalized) {
+    return "";
+  }
+
+  return /^Bearer\s+/i.test(normalized) ? normalized : `Bearer ${normalized}`;
+}
+
+function createWorkflowExecutionId() {
+  return `codex_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function createTaskId() {
+  return `codex-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function collectAiImageUrls(result) {
+  const rawImages = Array.isArray(result?.images) ? result.images : [];
+  const primaryImage = typeof result?.image === "string" ? result.image : "";
+  const merged = primaryImage ? [primaryImage, ...rawImages] : [...rawImages];
+  const uniqueMap = new Map();
+
+  merged.forEach((imageUrl) => {
+    const sourceUrl = toAiSourceMediaUrl(imageUrl);
+    if (!sourceUrl || isVideoUrl(sourceUrl)) {
+      return;
+    }
+
+    const key = buildImageDedupKey(sourceUrl);
+    if (!uniqueMap.has(key)) {
+      uniqueMap.set(key, sourceUrl);
+    }
+  });
+
+  return [...uniqueMap.values()].slice(0, 12);
+}
+
+function toAiSourceMediaUrl(mediaUrl) {
+  if (!mediaUrl) {
+    return "";
+  }
+
+  try {
+    const parsed = new URL(mediaUrl, "http://127.0.0.1");
+    let sourceUrl = parsed;
+
+    if (parsed.pathname === "/api/image") {
+      const rawUrl = parsed.searchParams.get("url");
+      if (rawUrl) {
+        sourceUrl = new URL(decodeURIComponent(rawUrl));
+      }
+    }
+
+    return normalizeMediaUrlForAi(sourceUrl);
+  } catch (error) {
+    return String(mediaUrl || "").trim();
+  }
+}
+
+function isVideoUrl(url) {
+  return /\.(mp4|mov|m4v|webm|m3u8)(\?|#|$)/i.test(String(url || ""));
+}
+
+function normalizeMediaUrlForAi(sourceUrl) {
+  const cleanUrl = new URL(sourceUrl.toString());
+
+  for (const key of [...cleanUrl.searchParams.keys()]) {
+    if (/^(w|h|width|height|quality|q|format|fit|resize|imageview2|x-oss-process|fm|fmt|ext)$/i.test(key)) {
+      cleanUrl.searchParams.delete(key);
+    }
+  }
+
+  cleanUrl.hash = "";
+  const query = cleanUrl.searchParams.toString();
+  return `${cleanUrl.origin}${cleanUrl.pathname}${query ? `?${query}` : ""}`;
+}
+
+function buildAiResponseFormat() {
+  return {
+    type: "json_schema",
+    json_schema: {
+      name: "prompt_output_schema",
+      strict: true,
+      schema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          rewrite_prompt: {
+            type: "string",
+            description:
+              "给其他 AI 使用的仿写提示词，描述标题、正文结构、语气、信息组织和风格模仿要求。",
+          },
+          image_prompt: {
+            type: "string",
+            description:
+              "给其他 AI 使用的图片复刻提示词，需要按图一、图二等逐张分析并输出可直接复用的复刻词。",
+          },
+        },
+        required: ["rewrite_prompt", "image_prompt"],
+      },
+    },
+  };
+}
+
+function buildAiSystemPrompt() {
+  return [
+    "你是一名资深小红书内容策划 + 资深视觉导演 + 文生图提示词专家。",
+    "你会同时完成两个任务：",
+    "1. 生成一段高质量的仿写提示词，用于让其他 AI 参考这条笔记的标题、正文结构、语气、信息组织方式去仿写内容。",
+    "2. 生成一段高质量的图片复刻提示词，用于让其他 AI 在接收“用户上传的产品图”后，保留该产品的外形、比例、品牌和文字信息，只迁移参考图的拍摄效果。",
+    "如果用户提供了多张参考图，图片复刻提示词必须按图一、图二、图三逐张输出，每张图都单独分析，不得泛化合并。",
+    "图片复刻提示词必须基于实际图片内容分析，不能只依据文字内容猜测。",
+    "输出必须是 JSON 对象，且只输出 JSON，不要添加解释文字。",
+    'JSON 结构固定为：{"rewrite_prompt":"...","image_prompt":"..."}',
+  ].join("\n");
+}
+
+function buildAiUserContent(result, imageUrls) {
+  const title = String(result?.title || "").trim();
+  const body = String(result?.body || "").trim();
+  const tags = Array.isArray(result?.tags) ? result.tags.map((tag) => String(tag || "").trim()).filter(Boolean) : [];
+
+  const textBlock = [
+    "请根据以下笔记内容和附带图片完成输出。",
+    `标题：${title || "-"}`,
+    `正文：${body || "-"}`,
+    `标签：${tags.length ? tags.join("、") : "-"}`,
+    `参考图数量：${imageUrls.length}`,
+    "",
+    "rewrite_prompt 要求：",
+    "1. 产出的是给其他 AI 使用的“仿写提示词”，不是直接写成新笔记。",
+    "2. 要明确标题长度、正文长度、语气、结构、叙述视角、重点信息、结尾方式等。",
+    "3. 要保留原笔记的人味和平台语感，避免空泛模板话。",
+    "",
+    "image_prompt 要求：",
+    "1. 必须按图一、图二、图三...逐张输出。",
+    "2. 每张图都要写：风格、构图、景别与机位、背景、光线、色彩、材质与质感、主体与道具细节、文字与版式（如有）、氛围关键词、产品主体保持要求、复刻 prompt（产品融合版）、负面提示、参数建议。",
+    "3. 产品主体保持要求里必须强调：保留用户上传产品图的外形、比例、品牌与文字信息，只迁移参考图的场景、构图、机位、光线和色彩。",
+    "4. 图片复刻 prompt 的目标是让其他 AI 在接收产品图时，尽量复刻参考图的视觉效果。",
+    "5. 不能提到“白牌”。",
+  ].join("\n");
+
+  if (!imageUrls.length) {
+    return textBlock;
+  }
+
+  return [
+    {
+      type: "text",
+      text: textBlock,
+    },
+    ...imageUrls.map((imageUrl) => ({
+      type: "image_url",
+      image_url: {
+        url: imageUrl,
+      },
+    })),
+  ];
+}
+
+function parseAiResponsePayload(rawText) {
+  const directPayload = tryParseJson(rawText);
+  if (directPayload) {
+    return directPayload;
+  }
+
+  const ssePayloads = extractSsePayloads(rawText);
+  if (ssePayloads.length) {
+    return ssePayloads[ssePayloads.length - 1];
+  }
+
+  throw new Error(`AI 返回不是合法 JSON：${truncateErrorText(rawText)}`);
+}
+
+function tryParseJson(value) {
+  if (typeof value !== "string" || !value.trim()) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(value);
+  } catch (error) {
+    return null;
+  }
+}
+
+function extractSsePayloads(rawText) {
+  const payloads = [];
+  const lines = String(rawText || "").replace(/\r/g, "").split("\n");
+  let dataLines = [];
+
+  const flush = () => {
+    if (!dataLines.length) {
+      return;
+    }
+
+    const joined = dataLines.join("\n").trim();
+    dataLines = [];
+    if (!joined || joined === "[DONE]") {
+      return;
+    }
+
+    const parsed = tryParseJson(joined);
+    if (parsed) {
+      payloads.push(parsed);
+    }
+  };
+
+  lines.forEach((line) => {
+    if (!line.trim()) {
+      flush();
+      return;
+    }
+
+    if (line.startsWith("data:")) {
+      dataLines.push(line.slice(5).trim());
+    }
+  });
+
+  flush();
+  return payloads;
+}
+
+function extractAiMessageContent(payload) {
+  const workflowContent = payload?.data?.content;
+  if (typeof workflowContent === "string" && workflowContent.trim()) {
+    return workflowContent.trim();
+  }
+
+  if (workflowContent && typeof workflowContent === "object") {
+    return workflowContent;
+  }
+
+  if (typeof payload?.content === "string" && payload.content.trim()) {
+    return payload.content.trim();
+  }
+
+  const content = payload?.choices?.[0]?.message?.content;
+
+  if (typeof content === "string" && content.trim()) {
+    return content.trim();
+  }
+
+  if (Array.isArray(content)) {
+    return content
+      .map((item) => {
+        if (typeof item === "string") {
+          return item;
+        }
+
+        if (item && typeof item.text === "string") {
+          return item.text;
+        }
+
+        return "";
+      })
+      .join("")
+      .trim();
+  }
+
+  throw new Error("AI 返回内容为空。");
+}
+
+function parseAiJsonContent(content) {
+  if (content && typeof content === "object") {
+    return content;
+  }
+
+  try {
+    return JSON.parse(content);
+  } catch (error) {
+    const matched = content.match(/\{[\s\S]*\}/);
+    if (matched) {
+      return JSON.parse(matched[0]);
+    }
+
+    throw new Error("AI 返回内容不是合法 JSON。");
+  }
+}
+
+function truncateErrorText(value) {
+  return String(value || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 180);
 }
 
 function extractStructuredContent(rawText, noteUrl) {

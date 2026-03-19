@@ -357,6 +357,36 @@ async function parseNoteFromUrl(noteUrl) {
   return response.json();
 }
 
+async function requestAiPrompts(result) {
+  const payload = {
+    result: {
+      title: result?.title || "",
+      body: result?.body || "",
+      tags: Array.isArray(result?.tags) ? result.tags : [],
+      image: typeof result?.image === "string" ? toSourceImageUrl(result.image) : "",
+      images: collectMediaLinks(result).images,
+    },
+  };
+
+  const response = await fetch("/api/prompts", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  const parsed = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw new Error(parsed?.error || "AI prompt request failed.");
+  }
+
+  return {
+    rewritePrompt: typeof parsed?.rewritePrompt === "string" ? parsed.rewritePrompt.trim() : "",
+    imagePrompt: typeof parsed?.imagePrompt === "string" ? parsed.imagePrompt.trim() : "",
+  };
+}
+
 function buildFallbackResult(noteUrl, rawText) {
   const title = noteUrlToLabel(noteUrl);
   const body =
@@ -386,13 +416,13 @@ function renderResult(result) {
 
   resultTitle.textContent = result.title || "-";
   resultBody.textContent = result.body || "-";
-  resultPrompt.value = buildRewritePrompt(result);
-  resultImagePrompt.value = "正在逐张分析图片视觉特征，请稍候...";
+  resultPrompt.value = "正在调用 AI 生成仿写提示词，请稍候...";
+  resultImagePrompt.value = "正在调用 AI 分析参考图，请稍候...";
   resetCopyButton();
   resetImagePromptButton();
   resetAllImagesButton();
   syncMediaLinks(result);
-  void hydrateImageGenerationPrompt(result);
+  void hydratePromptOutputs(result);
 
   resultTags.innerHTML = "";
   const safeTags = Array.isArray(result.tags) ? result.tags : [];
@@ -404,9 +434,29 @@ function renderResult(result) {
   });
 }
 
-async function hydrateImageGenerationPrompt(result) {
+async function hydratePromptOutputs(result) {
   const requestId = ++imagePromptRequestSerial;
 
+  try {
+    const aiPrompts = await requestAiPrompts(result);
+    if (requestId !== imagePromptRequestSerial) {
+      return;
+    }
+
+    resultPrompt.value = aiPrompts.rewritePrompt || buildRewritePrompt(result);
+    resultImagePrompt.value = aiPrompts.imagePrompt || (await buildImageGenerationPrompt(result));
+  } catch (error) {
+    if (requestId !== imagePromptRequestSerial) {
+      return;
+    }
+
+    resultPrompt.value = buildRewritePrompt(result);
+    resultImagePrompt.value = buildImagePromptFallback(result);
+    void hydrateImageGenerationPromptFallback(result, requestId);
+  }
+}
+
+async function hydrateImageGenerationPromptFallback(result, requestId) {
   try {
     const promptText = await buildImageGenerationPrompt(result);
     if (requestId !== imagePromptRequestSerial) {

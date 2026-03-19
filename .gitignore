@@ -1,1 +1,5 @@
 playwright-debug*.png
+.env
+.env.local
+.env.*.local
+tmp-*.json
