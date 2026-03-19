@@ -750,6 +750,13 @@ img {
   margin-bottom: 0;
 }
 
+.result-block-actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
 .tools-block .result-label {
   display: block;
   margin-bottom: 12px;
@@ -807,6 +814,57 @@ img {
 .copy-button.is-copied {
   background: rgba(74, 222, 128, 0.16);
   border-color: rgba(74, 222, 128, 0.34);
+}
+
+.copy-button.is-busy {
+  background: rgba(17, 17, 17, 0.08);
+  border-color: rgba(17, 17, 17, 0.14);
+  color: var(--text-secondary);
+}
+
+.copy-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.7;
+  transform: none;
+}
+
+.prompt-block-body {
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 12px;
+}
+
+.prompt-direction-group {
+  display: grid;
+  gap: 8px;
+}
+
+.prompt-direction-label {
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--text-secondary);
+  letter-spacing: 0.02em;
+}
+
+.prompt-direction-input {
+  width: 100%;
+  min-height: 84px;
+  resize: vertical;
+  border: 1px solid var(--border-color);
+  border-radius: 16px;
+  padding: 12px 14px;
+  font: inherit;
+  font-size: 0.9rem;
+  line-height: 1.6;
+  color: var(--text-primary);
+  background: rgba(250, 250, 250, 0.92);
+}
+
+.prompt-direction-input:focus {
+  outline: none;
+  border-color: rgba(255, 99, 31, 0.34);
+  box-shadow: 0 0 0 4px rgba(217, 255, 102, 0.22);
 }
 
 .prompt-editor {
@@ -924,6 +982,11 @@ img {
   .side-panels,
   .tools-grid {
     grid-template-columns: 1fr;
+  }
+
+  .result-block-actions {
+    width: 100%;
+    justify-content: flex-start;
   }
 
   .page-shell {

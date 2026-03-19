@@ -33,6 +33,15 @@ const FALLBACK_IMAGE =
   "https://images.unsplash.com/photo-1517841905240-472988babdf9?auto=format&fit=crop&w=1200&q=80";
 
 const SAMPLE_TAGS = ["内容解析", "链接抓取", "笔记结构化"];
+const WORKFLOW_TEMPLATE_VARIABLES = Object.freeze({
+  title: "{{ $('解析生成内容').item.json.title }}",
+  content: "{{ $('解析生成内容').item.json.content }}",
+  imageList: "{{ $('输入参数汇总').item.json['图片信息'] }}",
+  productImageList: "{{ $('文案提示词').item.json.image_url_list }}",
+  firstImage: "{{ $('输入参数汇总').item.json['图片信息'][0] }}",
+  logoHint: "{{ $('输入参数汇总').item.json['用户输入2'] }}",
+  forbiddenLogo: "{{ $('输入参数汇总').item.json['用户输入3'] }}",
+});
 
 const server = http.createServer(async (req, res) => {
   try {
@@ -111,6 +120,9 @@ async function handlePromptGeneration(req, res) {
 
   const body = await readJsonBody(req);
   const result = body?.result;
+  const target = normalizePromptTarget(body?.target);
+  const rewriteDirection = typeof body?.rewriteDirection === "string" ? body.rewriteDirection.trim() : "";
+  const imageDirection = typeof body?.imageDirection === "string" ? body.imageDirection.trim() : "";
 
   if (!result || typeof result !== "object") {
     writeJson(res, 400, { error: "缺少 result 参数。" });
@@ -118,7 +130,11 @@ async function handlePromptGeneration(req, res) {
   }
 
   try {
-    const prompts = await generatePromptsWithAi(result);
+    const prompts = await generatePromptsWithAi(result, {
+      target,
+      rewriteDirection,
+      imageDirection,
+    });
     writeJson(res, 200, prompts);
   } catch (error) {
     writeJson(res, 502, {
@@ -287,20 +303,25 @@ function isAiPromptConfigured() {
   return Boolean(AI_API_BASE_URL && AI_API_TOKEN);
 }
 
-async function generatePromptsWithAi(result) {
+function normalizePromptTarget(target) {
+  return target === "rewrite" || target === "image" ? target : "all";
+}
+
+async function generatePromptsWithAi(result, options = {}) {
   const endpointUrl = buildAiEndpointUrl();
   const imageUrls = collectAiImageUrls(result);
+  const target = normalizePromptTarget(options.target);
   const payload = {
     temperature: 0.2,
-    response_format: buildAiResponseFormat(),
+    response_format: buildAiResponseFormat(target),
     messages: [
       {
         role: "system",
-        content: buildAiSystemPrompt(),
+        content: buildAiSystemPrompt(target),
       },
       {
         role: "user",
-        content: buildAiUserContent(result, imageUrls),
+        content: buildAiUserContent(result, imageUrls, options),
       },
     ],
   };
@@ -330,13 +351,9 @@ async function generatePromptsWithAi(result) {
 
     return {
       rewritePrompt:
-        typeof promptJson.rewrite_prompt === "string" && promptJson.rewrite_prompt.trim()
-          ? promptJson.rewrite_prompt.trim()
-          : "",
+        target === "image" ? "" : formatRewritePromptOutput(promptJson.rewrite_prompt),
       imagePrompt:
-        typeof promptJson.image_prompt === "string" && promptJson.image_prompt.trim()
-          ? promptJson.image_prompt.trim()
-          : "",
+        target === "rewrite" ? "" : formatImagePromptOutput(promptJson.image_prompt),
     };
   } finally {
     clearTimeout(timeoutId);
@@ -441,7 +458,28 @@ function normalizeMediaUrlForAi(sourceUrl) {
   return `${cleanUrl.origin}${cleanUrl.pathname}${query ? `?${query}` : ""}`;
 }
 
-function buildAiResponseFormat() {
+function buildAiResponseFormat(target) {
+  const properties = {};
+  const required = [];
+
+  if (target !== "image") {
+    properties.rewrite_prompt = {
+      type: "string",
+      description:
+        "给其他 AI 使用的仿写提示词，描述标题、正文结构、语气、信息组织和风格模仿要求。",
+    };
+    required.push("rewrite_prompt");
+  }
+
+  if (target !== "rewrite") {
+    properties.image_prompt = {
+      type: "string",
+      description:
+        "给其他 AI 使用的产品场景迁移提示词，必须按“每张抓取图一段图片风格分析 + 一段可复用 Prompt 模板”的结构输出。",
+    };
+    required.push("image_prompt");
+  }
+
   return {
     type: "json_schema",
     json_schema: {
@@ -450,60 +488,110 @@ function buildAiResponseFormat() {
       schema: {
         type: "object",
         additionalProperties: false,
-        properties: {
-          rewrite_prompt: {
-            type: "string",
-            description:
-              "给其他 AI 使用的仿写提示词，描述标题、正文结构、语气、信息组织和风格模仿要求。",
-          },
-          image_prompt: {
-            type: "string",
-            description:
-              "给其他 AI 使用的图片复刻提示词，需要按图一、图二等逐张分析并输出可直接复用的复刻词。",
-          },
-        },
-        required: ["rewrite_prompt", "image_prompt"],
+        properties,
+        required,
       },
     },
   };
 }
 
-function buildAiSystemPrompt() {
-  return [
+function buildAiSystemPrompt(target) {
+  const vars = WORKFLOW_TEMPLATE_VARIABLES;
+  const lines = [
     "你是一名资深小红书内容策划 + 资深视觉导演 + 文生图提示词专家。",
-    "你会同时完成两个任务：",
-    "1. 生成一段高质量的仿写提示词，用于让其他 AI 参考这条笔记的标题、正文结构、语气、信息组织方式去仿写内容。",
-    "2. 生成一段高质量的图片复刻提示词，用于让其他 AI 在接收“用户上传的产品图”后，保留该产品的外形、比例、品牌和文字信息，只迁移参考图的拍摄效果。",
-    "如果用户提供了多张参考图，图片复刻提示词必须按图一、图二、图三逐张输出，每张图都单独分析，不得泛化合并。",
-    "图片复刻提示词必须基于实际图片内容分析，不能只依据文字内容猜测。",
-    "输出必须是 JSON 对象，且只输出 JSON，不要添加解释文字。",
-    'JSON 结构固定为：{"rewrite_prompt":"...","image_prompt":"..."}',
-  ].join("\n");
+  ];
+
+  if (target === "rewrite") {
+    lines.push("你当前只需要生成仿写提示词，不要输出场景迁移提示词。");
+  } else if (target === "image") {
+    lines.push("你当前只需要生成场景迁移提示词，不要输出仿写提示词。");
+  } else {
+    lines.push("你会同时完成两个任务：");
+    lines.push("1. 生成一段高质量的仿写提示词，用于让其他 AI 参考这条笔记的标题、正文结构、语气、信息组织方式去仿写内容。");
+    lines.push("2. 生成一段高质量的产品场景迁移提示词，用于让其他 AI 基于工作流变量、主体产品图和场景要求，生成可直接复用的产品场景迁移模板。");
+  }
+
+  lines.push("场景迁移提示词必须是可直接粘贴到 n8n / 工作流节点里的模板，不是对当前图片的解释说明。");
+  lines.push("场景迁移提示词要严格按照“每张抓取图 = 一段图片风格分析 + 一段可复用 Prompt 模板”的格式输出。");
+  lines.push("抓取到几张图，就输出几个图块；图一对应抓取图1，图二对应抓取图2，以此类推。");
+  lines.push("每个图块结构固定为：");
+  lines.push("【图一】");
+  lines.push("🌿 图片风格与元素分析");
+  lines.push("这张图是......，核心特征如下：");
+  lines.push("- 空间风格：...");
+  lines.push("- 核心元素：...");
+  lines.push("- 光线与色彩：...");
+  lines.push("- 构图与视角：...");
+  lines.push("- 氛围：...");
+  lines.push("✍️ 可复用 Prompt 模板（支持变量替换）");
+  lines.push("```markdown");
+  lines.push("...prompt...");
+  lines.push("```");
+  lines.push("每张图的分析必须直接描述图片里能看到的具体空间、家具、吧台、窗景、人物、道具、材质和构图，不要只写抽象风格词。");
+  lines.push(`Prompt 模板里必须直接使用产品图变量 ${vars.productImageList}，并明确保留用户上传产品图的外形、比例、品牌与文字信息。`);
+  lines.push("Prompt 必须是完整可单独执行的成图指令，不要写成说明文，不要依赖“参考抓取图”这种上下文。");
+  lines.push("不要禁止产品本身已有的品牌和文字信息；要禁止的是额外乱加的错误文字、错误 logo、错误贴纸和不相关文案。");
+  lines.push("如果当前内容明显不是新茶饮/咖啡，也要保留相同结构，只把“产品层”的产品类型表达改成最匹配的类目。");
+  lines.push("仿写提示词和场景迁移提示词都必须结构化输出，不允许写成一整段流水句。");
+  lines.push("每个一级标题必须单独占一行，分段清晰，可直接复制给其他 AI 使用。");
+  lines.push("如果用户额外提供了生成方向，请按 0.5 权重吸收。含义是：方向输入属于中等影响力的调节项，可以影响风格、语气、结构和画面倾向，但不能推翻原始标题、正文、标签和参考图主轴。");
+  lines.push("输出必须是 JSON 对象，且只输出 JSON，不要添加解释文字。");
+
+  if (target === "rewrite") {
+    lines.push('JSON 结构固定为：{"rewrite_prompt":"..."}');
+  } else if (target === "image") {
+    lines.push('JSON 结构固定为：{"image_prompt":"..."}');
+  } else {
+    lines.push('JSON 结构固定为：{"rewrite_prompt":"...","image_prompt":"..."}');
+  }
+
+  return lines.join("\n");
 }
 
-function buildAiUserContent(result, imageUrls) {
+function buildAiUserContent(result, imageUrls, options = {}) {
   const title = String(result?.title || "").trim();
   const body = String(result?.body || "").trim();
   const tags = Array.isArray(result?.tags) ? result.tags.map((tag) => String(tag || "").trim()).filter(Boolean) : [];
+  const target = normalizePromptTarget(options.target);
+  const rewriteDirection = typeof options.rewriteDirection === "string" ? options.rewriteDirection.trim() : "";
+  const imageDirection = typeof options.imageDirection === "string" ? options.imageDirection.trim() : "";
+  const imagePromptExample = buildSceneTransferTemplateDynamicExample(result, imageDirection);
 
   const textBlock = [
     "请根据以下笔记内容和附带图片完成输出。",
+    `本次生成目标：${target === "rewrite" ? "仅生成仿写提示词" : target === "image" ? "仅生成场景迁移提示词" : "同时生成仿写提示词和场景迁移提示词"}`,
     `标题：${title || "-"}`,
     `正文：${body || "-"}`,
     `标签：${tags.length ? tags.join("、") : "-"}`,
     `参考图数量：${imageUrls.length}`,
+    `仿写提示词方向：${rewriteDirection || "无额外方向"}`,
+    `场景迁移提示词方向：${imageDirection || "无额外方向"}`,
     "",
     "rewrite_prompt 要求：",
     "1. 产出的是给其他 AI 使用的“仿写提示词”，不是直接写成新笔记。",
-    "2. 要明确标题长度、正文长度、语气、结构、叙述视角、重点信息、结尾方式等。",
-    "3. 要保留原笔记的人味和平台语感，避免空泛模板话。",
+    "2. 必须结构化输出，至少包含：【标题策略】【正文结构】【语气风格】【关键信息锚点】【标签策略】【写作限制】。",
+    "3. 要明确标题长度、正文长度、语气、结构、叙述视角、重点信息、结尾方式等。",
+    "4. 要保留原笔记的人味和平台语感，避免空泛模板话。",
+    "5. 如果仿写提示词方向不为空，请按 0.5 权重吸收：可以调节语气、表达方式、结构重心，但不能推翻原笔记核心信息。",
     "",
     "image_prompt 要求：",
-    "1. 必须按图一、图二、图三...逐张输出。",
-    "2. 每张图都要写：风格、构图、景别与机位、背景、光线、色彩、材质与质感、主体与道具细节、文字与版式（如有）、氛围关键词、产品主体保持要求、复刻 prompt（产品融合版）、负面提示、参数建议。",
-    "3. 产品主体保持要求里必须强调：保留用户上传产品图的外形、比例、品牌与文字信息，只迁移参考图的场景、构图、机位、光线和色彩。",
-    "4. 图片复刻 prompt 的目标是让其他 AI 在接收产品图时，尽量复刻参考图的视觉效果。",
-    "5. 不能提到“白牌”。",
+    "1. 必须输出强结构化模板，不能写成一大段，且必须是可直接粘贴到工作流中的模板。",
+    "2. 输出必须按图分块：抓取到几张图，就输出几个图块。",
+    "3. 每个图块固定结构为：【图X】+“🌿 图片风格与元素分析”+ 5 条分析 bullet +“✍️ 可复用 Prompt 模板（支持变量替换）”+ 一个 markdown 代码块。",
+    "4. 分析 bullet 必须固定为：空间风格、核心元素、光线与色彩、构图与视角、氛围。",
+    "5. 每个图块里的具体视觉内容都只能来自对应抓取图，不允许混图。",
+    "6. 必须直接描述图片中真实可见的具体物件和空间细节，不要只写抽象风格词。",
+    `7. Prompt 模板必须直接使用产品图变量 ${WORKFLOW_TEMPLATE_VARIABLES.productImageList}。`,
+    "8. Prompt 模板必须明确保留用户上传产品图的外形、比例、品牌与文字信息。",
+    "9. Prompt 模板必须是最终成图指令，直接可喂给其他 AI 生成图片。",
+    "10. 不要写“读取抓取图”“参考抓取图”等依赖上下文的话。",
+    "11. 不要禁止产品本身已有的品牌和文字信息；只禁止额外乱加的错误文字、错误 logo、错误贴纸和无关文案。",
+    "12. 不能提到“白牌”。",
+    "13. 如果场景迁移提示词方向不为空，请按 0.5 权重吸收：可以调节模板表达方式、画面倾向和风格强调，但不能推翻产品保持规则和抓取图对应关系。",
+    "14. 如果内容不是茶饮/咖啡，也保持同样结构，只把主体产品表达替换成更匹配的类目描述。",
+    "",
+    "image_prompt 输出模板示意：",
+    imagePromptExample,
   ].join("\n");
 
   if (!imageUrls.length) {
@@ -522,6 +610,254 @@ function buildAiUserContent(result, imageUrls) {
       },
     })),
   ];
+}
+
+function buildSceneTransferTemplateDynamicExample(result, direction = "") {
+  const vars = WORKFLOW_TEMPLATE_VARIABLES;
+  const theme = inferSceneTransferTemplateThemeFromResult(result);
+  const imageCount = Math.max(Array.isArray(result?.images) ? result.images.length : 0, 1);
+  const styleSections = Array.from({ length: imageCount }, (_, index) =>
+    buildSceneTransferDynamicStyleExample(index, theme, vars)
+  ).join("\n\n");
+
+  return styleSections;
+}
+
+function buildSceneTransferDynamicStyleExample(index, theme, vars) {
+  const serial = index + 1;
+
+  return [
+    `【图${numberToChineseText(serial)}】`,
+    "🌿 图片风格与元素分析",
+    `这张图是高级简约感的${theme.productSceneLabel}场景参考图，核心特征如下：`,
+    `- 空间风格：直接写出对应抓取图${serial}的空间气质和场景类型，例如“现代极简咖啡店室内空间，通透干净，留白克制”`,
+    `- 核心元素：直接写出抓取图${serial}里真实可见的吧台、桌椅、窗景、人物、道具、器具或陈列细节`,
+    `- 光线与色彩：直接写出主光方向、亮部控制、阴影关系，以及主色调、冷暖关系和整体色彩气质`,
+    `- 构图与视角：直接写出对应抓取图${serial}的构图方式、景别、机位和视角`,
+    `- 氛围：直接写出这张图带来的情绪和生活方式感，不要只写空泛词`,
+    "",
+    "✍️ 可复用 Prompt 模板（支持变量替换）",
+    "```markdown",
+    `photorealistic lifestyle scene based on the visual style of image ${serial}, featuring the uploaded ${theme.productSceneLabel} from ${vars.productImageList}, preserve the product's original shape, proportions, branding, and text details exactly as uploaded, directly describe the specific background, props, light, color palette, composition, camera angle, and atmosphere from this image block, realistic texture, highly detailed, no altered brand text, no unrelated stickers or text overlays, --ar 3:4 --style raw`,
+    "```",
+  ].join("\n");
+}
+
+function buildSceneTransferTemplateExample(result, direction = "") {
+  const vars = WORKFLOW_TEMPLATE_VARIABLES;
+  const theme = inferSceneTransferTemplateThemeFromResult(result);
+
+  return [
+    "【变量占位（固定保留）】",
+    `- 正文内容：${vars.content}`,
+    `- 主体产品图/场景图列表：${vars.imageList}`,
+    `- 标题：${vars.title}`,
+    `- 主体产品图首图：${vars.firstImage}`,
+    `- LOGO参考：${vars.logoHint}`,
+    `- 禁用LOGO：${vars.forbiddenLogo}`,
+    "",
+    "【核心主题】",
+    `以标题“${vars.title}”为核心，结合正文“${vars.content}”和产品图“${vars.firstImage}”，LOGO“${vars.logoHint}”作为依据生成${theme.outputLabel}。`,
+    "",
+    "【生成参数】",
+    "- 生成图片数量：7 张，7种风格各生成1张",
+    "- 图片比例：9:16 竖图",
+    "- 输出要求：每张图独立风格，不混合、不简化，统一视觉调性；**图片中不得出现任何文字、LOGO、标签、贴纸类元素**；**强化真实生活感，弱化AI合成感**",
+    `- 产品保持基准：主体产品以“${vars.firstImage}”为唯一依据，不变形、不变色、不增删元素/文字`,
+    `- 场景参考输入：主体产品图/场景图列表统一引用“${vars.imageList}”`,
+    ...(direction ? [`- 额外方向（权重 0.5）：${direction}`, "- 方向吸收规则：只中度影响风格强调和氛围包装，不覆盖产品保持规则与七种场景骨架。"] : []),
+    "",
+    "【7种风格精准规范（可复用）】",
+    "---",
+    "### 风格1：车内随拍生活风（通勤日常·真实手机抓拍）",
+    "#### 背景层",
+    "1. 底色：**冷调灰蓝到浅灰渐变**，真实汽车内饰纹理，细腻皮革与塑料质感，无反光过度",
+    "2. 光线：柔和阴天自然光从侧窗斜射进入，形成柔和明暗过渡，无硬阴影",
+    "3. 环境细节：车门扶手、安全带卡扣、副驾位置轻微虚化，窗外街道、树木、车辆呈现自然动态模糊，远处行人轮廓模糊可见，营造真实通勤街景氛围",
+    "",
+    "#### 产品层",
+    `核心主体：${theme.productLabel}，无任何LOGO、贴纸、文字，主体占比45%，表面带自然使用痕迹、轻微水汽或指纹痕迹，质感真实可感`,
+    "构图：素人单手自然持握，手臂入镜一半，镜头贴近车窗，轻微倾斜角度，模拟随手抓拍",
+    "光影：主体表面呈现柔和反光，无夸张高光，无塑料感",
+    "",
+    "#### 氛围强化",
+    "- 全图加入**轻微胶片颗粒感**，模拟 iPhone 原生相机直出",
+    "- 色彩偏冷白、低饱和，无过度磨皮，无AI完美感",
+    "- 背景保持自然虚化，人物、车辆、街景均为模糊动态效果",
+    "",
+    "---",
+    "### 风格2：阳光治愈户外风（公园树荫·温柔自然光）",
+    "#### 背景层",
+    "1. 底色：**浅绿到米白渐变**，真实草地、石板路、树皮纹理自然融合",
+    "2. 光线：午后侧逆光，树叶形成**斑驳光影**洒在地面与主体表面，光感温柔通透",
+    "3. 环境细节：草丛、落叶、树枝轻微虚化，远处行人、散步身影模糊可见，营造松弛公园氛围",
+    "",
+    "#### 产品层",
+    `核心主体：${theme.productLabel}，无LOGO无贴纸，主体占比45%，表面带自然水珠、反光或细微质感变化`,
+    "构图：素人双手轻握，手臂自然入镜，平视微仰角度，松弛不刻意",
+    "光影：柔和透光感，主体半透明或高光层次自然，不做硬质广告光",
+    "",
+    "#### 氛围强化",
+    "- 暖调低饱和，轻微柔焦",
+    "- 加入真实环境噪点，无AI光滑感",
+    "- 背景保持浅景深虚化，突出主体",
+    "",
+    "---",
+    "### 风格3：门店氛围打卡风（商圈店内·真实到店感）",
+    "#### 背景层",
+    "1. 底色：**暖白到浅灰渐变**，店内大理石台面、木质柜体真实纹理",
+    "2. 光线：店内暖光射灯 + 环境漫反射，光线柔和不刺眼",
+    "3. 环境细节：模糊的店内顾客身影、店员动作轮廓、远处吧台设备虚化，营造热闹但不杂乱的真实门店氛围",
+    "",
+    "#### 产品层",
+    `核心主体：${theme.productLabel}，无LOGO无贴纸，主体占比45%，主体轮廓完整清晰`,
+    "构图：单手持物，手臂自然入镜，轻微仰拍，模拟到店随手拍",
+    "光影：柔和店内反光，无夸张高光，质感自然",
+    "",
+    "#### 氛围强化",
+    "- 暖调轻微泛黄，保持真实店内色温",
+    "- 轻微颗粒，浅景深虚化",
+    "- 背景人物动态模糊，无僵硬AI感",
+    "",
+    "---",
+    "### 风格4：新中式禅意窗景风（庭院窗边·东方静谧感）",
+    "#### 背景层",
+    "1. 底色：**原木深棕到浅灰渐变**，实木桌面、宣纸、窗棂纹理细腻真实",
+    "2. 光线：柔和窗景漫射光，无直射，安静温润",
+    "3. 环境细节：窗外庭院绿植、白墙灰瓦轻微虚化，室内花瓶、枯枝、陶瓷器皿简约点缀，营造东方静谧氛围",
+    "",
+    "#### 产品层",
+    `核心主体：${theme.productLabel}，无LOGO无文字，质感温润，占比45%`,
+    "构图：桌面平视构图，安静摆放，无手持动作",
+    "光影：柔和阴影，层次干净雅致",
+    "",
+    "#### 氛围强化",
+    "- 低饱和、灰调温润色彩",
+    "- 轻微胶片颗粒，无锐化过度",
+    "- 画面干净、安静、真实不做作",
+    "",
+    "---",
+    "### 风格5：城市街头元气风（斑马线街拍·年轻活力）",
+    "#### 背景层",
+    "1. 底色：**浅灰到深灰渐变**，真实柏油马路、斑马线纹理清晰自然",
+    "2. 光线：晴天正面自然光，明亮清爽",
+    "3. 环境细节：街道、建筑、行人、自行车、路灯全部自然虚化，营造城市街头活力氛围",
+    "",
+    "#### 产品层",
+    `核心主体：${theme.productLabel}，无LOGO无贴纸，占比45%，整体清晰完整`,
+    "构图：双手持物，街头平视角度，自然松弛",
+    "光影：明亮干净，轻微反光，真实塑料、玻璃、纸面或金属质感",
+    "",
+    "#### 氛围强化",
+    "- 高明亮度、低对比、轻微冷调",
+    "- 街头随拍颗粒感",
+    "- 背景动态模糊，无AI僵硬感",
+    "",
+    "---",
+    "### 风格6：艺术轻奢服务风（店内服务视角·高级简约）",
+    "#### 背景层",
+    "1. 底色：**深灰到银灰渐变**，金属架、亚克力板、墙面质感高级细腻",
+    "2. 光线：顶光 + 环境柔光，明暗层次高级",
+    "3. 环境细节：空白纸杯或包装盒堆叠、店员袖口、简约绿植虚化，营造轻奢店内氛围",
+    "",
+    "#### 产品层",
+    `核心主体：${theme.productLabel}，无LOGO无文字，占比40%，主体边缘锐利但不过分精修`,
+    "构图：店员递物视角，手部入镜，平视构图",
+    "光影：细腻金属反光与表面质感，无夸张特效",
+    "",
+    "#### 氛围强化",
+    "- 低饱和、高级灰调",
+    "- 轻微细腻颗粒",
+    "- 背景浅景深，突出高级感",
+    "",
+    "---",
+    "### 风格7：新中式清新国风（户外轻国风·温柔干净）",
+    "#### 背景层",
+    "1. 底色：**米白到浅灰渐变**，干净路面、墙面、植物纹理自然",
+    "2. 光线：明亮柔光，无硬阴影",
+    "3. 环境细节：素人衣摆、路边花草、远处行人模糊，营造清新国风户外感",
+    "",
+    "#### 产品层",
+    `核心主体：${theme.productLabel}，无LOGO无贴纸，占比45%，画面重心稳定`,
+    "构图：双手持握或轻摆放，温柔平视角度",
+    "光影：干净通透，柔和自然",
+    "",
+    "#### 氛围强化",
+    "- 清新低饱和，暖调柔和",
+    "- 真实手机实拍颗粒",
+    "- 背景自然虚化，无AI完美感",
+    "",
+    "【终极禁用规则（绝对执行）】",
+    "1. **严格禁止图片中出现任何文字、LOGO、标签、贴纸、二维码、装饰性文字元素**，背景文字需完全模糊至不可辨认",
+    "2. 禁止日期、网址、二维码、乱彩符号、多余装饰文字",
+    "3. 产品必须为核心视觉主体，占比≥40%，清晰完整不被遮挡",
+    "4. 禁止过度干净或完美的AI质感，必须加入**环境噪点、轻微模糊、动态人物、真实生活细节**强化实拍感",
+    "5. 色彩严格匹配场景：车内风=冷灰蓝；户外风=暖绿；门店风=暖白；禅意风=原木灰；街头风=冷灰；轻奢风=深灰；国风=米白浅灰",
+    `6. 禁止LOGO「${vars.forbiddenLogo}」在画面中以任何形式展示`,
+    `7. 禁止产品图「${vars.firstImage}」变形、变色、增删元素/文字`,
+    "8. 禁止出现乱码、文字不清晰！禁止出现乱码、文字不清晰！禁止出现乱码、文字不清晰！",
+  ].join("\n");
+}
+
+function numberToChineseText(value) {
+  const digits = ["零", "一", "二", "三", "四", "五", "六", "七", "八", "九"];
+
+  if (value <= 10) {
+    if (value === 10) {
+      return "十";
+    }
+
+    return digits[value] || String(value);
+  }
+
+  if (value < 20) {
+    return `十${digits[value % 10]}`;
+  }
+
+  const tens = Math.floor(value / 10);
+  const units = value % 10;
+  return `${digits[tens]}十${units ? digits[units] : ""}`;
+}
+
+function inferSceneTransferTemplateThemeFromResult(result) {
+  const title = String(result?.title || "").trim();
+  const body = String(result?.body || "").trim();
+  const tags = Array.isArray(result?.tags) ? result.tags.map((tag) => String(tag || "").trim()).filter(Boolean) : [];
+  const combined = [title, body, tags.join(" ")].filter(Boolean).join(" ");
+
+  if (/(咖啡|拿铁|美式|奶茶|果茶|茶饮|饮品|柠檬茶|奶盖)/.test(combined)) {
+    return {
+      outputLabel: "**素人实拍感**的新茶饮/咖啡分享图",
+      productLabel: "真实质感饮品杯",
+      productSceneLabel: "茶饮",
+      unifiedTone: "清新治愈/高级简约风格，店铺高级感场景全景图+茶饮特写图+第一视角松弛感打卡图",
+    };
+  }
+
+  if (/(护肤|精华|面霜|水乳|彩妆|口红|粉底|香水)/.test(combined)) {
+    return {
+      outputLabel: "**素人实拍感**的护肤/彩妆产品分享图",
+      productLabel: "真实质感产品包装",
+      productSceneLabel: "护肤/彩妆产品",
+      unifiedTone: "清新治愈/高级简约风格，梳妆台或店铺高级感场景全景图+护肤/彩妆产品特写图+第一视角松弛感打卡图",
+    };
+  }
+
+  if (/(包包|鞋子|穿搭|单品|服装|饰品|配件)/.test(combined)) {
+    return {
+      outputLabel: "**素人实拍感**的单品种草分享图",
+      productLabel: "真实质感主体单品",
+      productSceneLabel: "主体单品",
+      unifiedTone: "清新治愈/高级简约风格，空间氛围场景全景图+主体单品特写图+第一视角松弛感打卡图",
+    };
+  }
+
+  return {
+    outputLabel: "**素人实拍感**的产品场景分享图",
+    productLabel: "真实质感主体产品",
+    productSceneLabel: "主体产品",
+    unifiedTone: "清新治愈/高级简约风格，高级感场景全景图+主体产品特写图+第一视角松弛感打卡图",
+  };
 }
 
 function parseAiResponsePayload(rawText) {
@@ -642,6 +978,41 @@ function parseAiJsonContent(content) {
 
     throw new Error("AI 返回内容不是合法 JSON。");
   }
+}
+
+function formatRewritePromptOutput(value) {
+  if (typeof value !== "string" || !value.trim()) {
+    return "";
+  }
+
+  let formatted = value.replace(/\r/g, "").trim();
+  formatted = formatted.replace(/\s*(【标题策略】|【正文结构】|【语气风格】|【关键信息锚点】|【标签策略】|【写作限制】)/g, "\n$1\n");
+  formatted = formatted.replace(/\s*(标题：|正文：|标签：)/g, "\n$1");
+  formatted = formatted.replace(/\n{3,}/g, "\n\n");
+  return formatted.trim();
+}
+
+function formatImagePromptOutput(value) {
+  if (typeof value !== "string" || !value.trim()) {
+    return "";
+  }
+
+  let formatted = value.replace(/\r/g, "").trim();
+  formatted = formatted.replace(/\s*(【变量占位（固定保留）】|【核心主题】|【生成参数】|【\d+种风格精准规范（对应抓取图）】|【7种风格精准规范（可复用）】|【终极禁用规则（绝对执行）】|【统一画面基调】)/g, "\n$1\n");
+  formatted = formatted.replace(/\s*(====================)/g, "\n\n$1\n");
+  formatted = formatted.replace(/\s*(以下仅作为风格参考)/g, "\n$1\n");
+  formatted = formatted.replace(/\s*(【图[一二三四五六七八九十]+】)/g, "\n\n====================\n$1\n");
+  formatted = formatted.replace(/\s*(🌿\s*图片风格与元素分析)/g, "\n$1\n");
+  formatted = formatted.replace(/\s*(✍️\s*可复用 Prompt 模板（支持变量替换）)/g, "\n\n$1\n");
+  formatted = formatted.replace(/\s*(---)/g, "\n\n$1\n");
+  formatted = formatted.replace(/\s*(###\s*风格[^\n]*)/g, "\n\n$1\n");
+  formatted = formatted.replace(/\s*(####\s*(?:背景层|产品层|氛围强化))/g, "\n$1\n");
+  formatted = formatted.replace(/\s*(参考图数量：)/g, "\n$1");
+  formatted = formatted.replace(/\s*(-\s*(?:正文内容|主体产品图\/场景图列表|标题|主体产品图首图|LOGO参考|禁用LOGO|生成图片数量|图片比例|输出要求|产品保持基准|场景参考输入|风格对应规则|模板自包含规则|生成模式|额外生成方向(?:（权重 0\.5）)?|额外方向(?:（权重 0\.5）)?|方向吸收规则|参考图数量|建议比例|内容语境|整体氛围|分析重点|场景迁移原则|整体色调|质感|氛围|产品呈现原则)：)/g, "\n$1");
+  formatted = formatted.replace(/\s*(-\s*(?:风格|构图|景别与机位|空间环境|背景|光线|配色|色彩|材质与表面质感|材质与质感|场景层次与留白|主体与道具细节|文字与版式（如有）|氛围关键词|场景迁移指令|产品主体保持要求|复刻 prompt（产品融合版）|负面提示|参数建议)：)/g, "\n$1");
+  formatted = formatted.replace(/(\n\s*====================\n)(?:\s*====================\n)+/g, "$1");
+  formatted = formatted.replace(/\n{3,}/g, "\n\n");
+  return formatted.trim();
 }
 
 function truncateErrorText(value) {

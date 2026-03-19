@@ -10,7 +10,7 @@
       href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700;800&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="./styles.css?v=20260318-5" />
+    <link rel="stylesheet" href="./styles.css?v=20260319-1" />
   </head>
   <body>
     <div class="page-shell">
@@ -109,29 +109,63 @@
             <div class="result-block result-block-prompt tools-block">
               <div class="result-block-head">
                 <span class="result-label">仿写提示词</span>
-                <button type="button" id="copy-prompt-button" class="copy-button">
-                  一键复制
-                </button>
+                <div class="result-block-actions">
+                  <button type="button" id="regenerate-prompt-button" class="copy-button">
+                    重新生成
+                  </button>
+                  <button type="button" id="copy-prompt-button" class="copy-button">
+                    一键复制
+                  </button>
+                </div>
               </div>
-              <textarea
-                id="result-prompt"
-                class="prompt-editor result-content-scroll"
-                spellcheck="false"
-              >-</textarea>
+              <div class="prompt-block-body">
+                <div class="prompt-direction-group">
+                  <label class="prompt-direction-label" for="rewrite-direction-input">提示词方向（权重 0.5）</label>
+                  <textarea
+                    id="rewrite-direction-input"
+                    class="prompt-direction-input"
+                    rows="2"
+                    placeholder="例如：更口语化、更像真人探店、突出价格和口感对比；作为中等强度调节，不覆盖原始内容主轴"
+                    spellcheck="false"
+                  ></textarea>
+                </div>
+                <textarea
+                  id="result-prompt"
+                  class="prompt-editor result-content-scroll"
+                  spellcheck="false"
+                >-</textarea>
+              </div>
             </div>
 
               <div class="result-block result-block-image-prompt tools-block tools-block-wide">
                 <div class="result-block-head">
-                  <span class="result-label">图片复刻 Prompt</span>
-                  <button type="button" id="copy-image-prompt-button" class="copy-button">
-                    一键复制
-                  </button>
+                  <span class="result-label">场景迁移 Prompt</span>
+                  <div class="result-block-actions">
+                    <button type="button" id="regenerate-image-prompt-button" class="copy-button">
+                      重新生成
+                    </button>
+                    <button type="button" id="copy-image-prompt-button" class="copy-button">
+                      一键复制
+                    </button>
+                  </div>
               </div>
-              <textarea
-                id="result-image-prompt"
-                class="prompt-editor result-content-scroll"
-                spellcheck="false"
-              >-</textarea>
+              <div class="prompt-block-body">
+                <div class="prompt-direction-group">
+                  <label class="prompt-direction-label" for="image-direction-input">场景迁移方向（权重 0.5）</label>
+                  <textarea
+                    id="image-direction-input"
+                    class="prompt-direction-input"
+                    rows="2"
+                    placeholder="例如：更商业化场景、更强调高级感、突出空间层次或留白感；作为中等强度调节，不覆盖参考图主轴"
+                    spellcheck="false"
+                  ></textarea>
+                </div>
+                <textarea
+                  id="result-image-prompt"
+                  class="prompt-editor result-content-scroll"
+                  spellcheck="false"
+                >-</textarea>
+              </div>
             </div>
           </div>
         </section>
@@ -200,6 +234,6 @@
       </main>
     </div>
 
-    <script src="./script.js?v=20260319-2"></script>
+    <script src="./script.js?v=20260319-3"></script>
   </body>
 </html>

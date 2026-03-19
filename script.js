@@ -19,8 +19,12 @@ const tabImages = document.querySelector("#tab-images");
 const tabVideos = document.querySelector("#tab-videos");
 const copyAllImagesButton = document.querySelector("#copy-all-images-button");
 const resultPrompt = document.querySelector("#result-prompt");
+const rewriteDirectionInput = document.querySelector("#rewrite-direction-input");
+const regeneratePromptButton = document.querySelector("#regenerate-prompt-button");
 const copyPromptButton = document.querySelector("#copy-prompt-button");
 const resultImagePrompt = document.querySelector("#result-image-prompt");
+const imageDirectionInput = document.querySelector("#image-direction-input");
+const regenerateImagePromptButton = document.querySelector("#regenerate-image-prompt-button");
 const copyImagePromptButton = document.querySelector("#copy-image-prompt-button");
 
 const FALLBACK_IMAGE =
@@ -31,6 +35,15 @@ const HISTORY_STORAGE_KEY = "note-parser:url-history";
 const HISTORY_LIMIT = 12;
 
 const SAMPLE_TAGS = ["内容解析", "链接抓取", "笔记结构化"];
+const WORKFLOW_TEMPLATE_VARIABLES = Object.freeze({
+  title: "{{ $('解析生成内容').item.json.title }}",
+  content: "{{ $('解析生成内容').item.json.content }}",
+  imageList: "{{ $('输入参数汇总').item.json['图片信息'] }}",
+  productImageList: "{{ $('文案提示词').item.json.image_url_list }}",
+  firstImage: "{{ $('输入参数汇总').item.json['图片信息'][0] }}",
+  logoHint: "{{ $('输入参数汇总').item.json['用户输入2'] }}",
+  forbiddenLogo: "{{ $('输入参数汇总').item.json['用户输入3'] }}",
+});
 
 const carouselState = {
   images: [],
@@ -45,8 +58,10 @@ const swipeState = {
 let copyPromptResetTimer = 0;
 let copyAllImagesResetTimer = 0;
 let copyImagePromptResetTimer = 0;
+let rewritePromptRequestSerial = 0;
 let imagePromptRequestSerial = 0;
 let urlHistory = loadUrlHistory();
+let currentParsedResult = null;
 const imagePromptAnalysisCache = new Map();
 const mediaLinkState = {
   activeTab: "images",
@@ -57,6 +72,8 @@ const mediaLinkState = {
 warnIfOpenedFromFile();
 renderUrlHistory();
 setSubmitButtonState("idle");
+setRegenerateButtonState(regeneratePromptButton, false, "重新生成");
+setRegenerateButtonState(regenerateImagePromptButton, false, "重新生成");
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -77,6 +94,9 @@ form.addEventListener("submit", async (event) => {
   }
 
   setSubmitButtonState("loading", "正在解析...");
+  currentParsedResult = null;
+  setRegenerateButtonState(regeneratePromptButton, false, "重新生成");
+  setRegenerateButtonState(regenerateImagePromptButton, false, "重新生成");
 
   try {
     const result = await parseNoteFromUrl(noteUrl);
@@ -143,6 +163,14 @@ copyImagePromptButton.addEventListener("click", async () => {
   } catch (error) {
     flashImagePromptButton("复制失败");
   }
+});
+
+regeneratePromptButton.addEventListener("click", async () => {
+  await regenerateRewritePrompt();
+});
+
+regenerateImagePromptButton.addEventListener("click", async () => {
+  await regenerateImagePrompt();
 });
 
 copyAllImagesButton.addEventListener("click", async () => {
@@ -357,7 +385,7 @@ async function parseNoteFromUrl(noteUrl) {
   return response.json();
 }
 
-async function requestAiPrompts(result) {
+async function requestAiPrompts(result, options = {}) {
   const payload = {
     result: {
       title: result?.title || "",
@@ -366,6 +394,9 @@ async function requestAiPrompts(result) {
       image: typeof result?.image === "string" ? toSourceImageUrl(result.image) : "",
       images: collectMediaLinks(result).images,
     },
+    target: normalizePromptTarget(options.target),
+    rewriteDirection: typeof options.rewriteDirection === "string" ? options.rewriteDirection.trim() : "",
+    imageDirection: typeof options.imageDirection === "string" ? options.imageDirection.trim() : "",
   };
 
   const response = await fetch("/api/prompts", {
@@ -387,6 +418,10 @@ async function requestAiPrompts(result) {
   };
 }
 
+function normalizePromptTarget(target) {
+  return target === "rewrite" || target === "image" ? target : "all";
+}
+
 function buildFallbackResult(noteUrl, rawText) {
   const title = noteUrlToLabel(noteUrl);
   const body =
@@ -405,6 +440,7 @@ function buildFallbackResult(noteUrl, rawText) {
 }
 
 function renderResult(result) {
+  currentParsedResult = result;
   emptyState.classList.add("hidden");
   resultCard.classList.remove("hidden");
 
@@ -417,12 +453,17 @@ function renderResult(result) {
   resultTitle.textContent = result.title || "-";
   resultBody.textContent = result.body || "-";
   resultPrompt.value = "正在调用 AI 生成仿写提示词，请稍候...";
-  resultImagePrompt.value = "正在调用 AI 分析参考图，请稍候...";
+  resultImagePrompt.value = "正在调用 AI 提炼场景迁移模板，请稍候...";
+  setRegenerateButtonState(regeneratePromptButton, true, "重新生成");
+  setRegenerateButtonState(regenerateImagePromptButton, true, "重新生成");
   resetCopyButton();
   resetImagePromptButton();
   resetAllImagesButton();
   syncMediaLinks(result);
-  void hydratePromptOutputs(result);
+  void hydratePromptOutputs(result, {
+    rewriteDirection: getRewriteDirectionValue(),
+    imageDirection: getImageDirectionValue(),
+  });
 
   resultTags.innerHTML = "";
   const safeTags = Array.isArray(result.tags) ? result.tags : [];
@@ -434,31 +475,42 @@ function renderResult(result) {
   });
 }
 
-async function hydratePromptOutputs(result) {
-  const requestId = ++imagePromptRequestSerial;
+async function hydratePromptOutputs(result, options = {}) {
+  const rewriteRequestId = ++rewritePromptRequestSerial;
+  const imageRequestId = ++imagePromptRequestSerial;
+  const rewriteDirection = typeof options.rewriteDirection === "string" ? options.rewriteDirection.trim() : "";
+  const imageDirection = typeof options.imageDirection === "string" ? options.imageDirection.trim() : "";
 
   try {
-    const aiPrompts = await requestAiPrompts(result);
-    if (requestId !== imagePromptRequestSerial) {
-      return;
+    const aiPrompts = await requestAiPrompts(result, {
+      target: "all",
+      rewriteDirection,
+      imageDirection,
+    });
+
+    if (rewriteRequestId === rewritePromptRequestSerial) {
+      resultPrompt.value = aiPrompts.rewritePrompt || buildRewritePrompt(result, rewriteDirection);
     }
 
-    resultPrompt.value = aiPrompts.rewritePrompt || buildRewritePrompt(result);
-    resultImagePrompt.value = aiPrompts.imagePrompt || (await buildImageGenerationPrompt(result));
+    if (imageRequestId === imagePromptRequestSerial) {
+      resultImagePrompt.value =
+        aiPrompts.imagePrompt || (await buildImageGenerationPrompt(result, imageDirection));
+    }
   } catch (error) {
-    if (requestId !== imagePromptRequestSerial) {
-      return;
+    if (rewriteRequestId === rewritePromptRequestSerial) {
+      resultPrompt.value = buildRewritePrompt(result, rewriteDirection);
     }
 
-    resultPrompt.value = buildRewritePrompt(result);
-    resultImagePrompt.value = buildImagePromptFallback(result);
-    void hydrateImageGenerationPromptFallback(result, requestId);
+    if (imageRequestId === imagePromptRequestSerial) {
+      resultImagePrompt.value = buildImagePromptFallback(result, imageDirection);
+      void hydrateImageGenerationPromptFallback(result, imageRequestId, imageDirection);
+    }
   }
 }
 
-async function hydrateImageGenerationPromptFallback(result, requestId) {
+async function hydrateImageGenerationPromptFallback(result, requestId, direction = "") {
   try {
-    const promptText = await buildImageGenerationPrompt(result);
+    const promptText = await buildImageGenerationPrompt(result, direction);
     if (requestId !== imagePromptRequestSerial) {
       return;
     }
@@ -469,8 +521,98 @@ async function hydrateImageGenerationPromptFallback(result, requestId) {
       return;
     }
 
-    resultImagePrompt.value = buildImagePromptFallback(result);
+    resultImagePrompt.value = buildImagePromptFallback(result, direction);
   }
+}
+
+async function regenerateRewritePrompt() {
+  if (!currentParsedResult) {
+    return;
+  }
+
+  const requestId = ++rewritePromptRequestSerial;
+  const rewriteDirection = getRewriteDirectionValue();
+  setRegenerateButtonState(regeneratePromptButton, false, "正在生成...");
+  resultPrompt.value = "正在根据提示词方向重新生成，请稍候...";
+
+  try {
+    const aiPrompts = await requestAiPrompts(currentParsedResult, {
+      target: "rewrite",
+      rewriteDirection,
+      imageDirection: getImageDirectionValue(),
+    });
+
+    if (requestId !== rewritePromptRequestSerial) {
+      return;
+    }
+
+    resultPrompt.value = aiPrompts.rewritePrompt || buildRewritePrompt(currentParsedResult, rewriteDirection);
+  } catch (error) {
+    if (requestId !== rewritePromptRequestSerial) {
+      return;
+    }
+
+    resultPrompt.value = buildRewritePrompt(currentParsedResult, rewriteDirection);
+  } finally {
+    if (requestId === rewritePromptRequestSerial) {
+      setRegenerateButtonState(regeneratePromptButton, true, "重新生成");
+    }
+  }
+}
+
+async function regenerateImagePrompt() {
+  if (!currentParsedResult) {
+    return;
+  }
+
+  const requestId = ++imagePromptRequestSerial;
+  const imageDirection = getImageDirectionValue();
+  setRegenerateButtonState(regenerateImagePromptButton, false, "正在生成...");
+  resultImagePrompt.value = "正在根据场景迁移方向重新生成，请稍候...";
+
+  try {
+    const aiPrompts = await requestAiPrompts(currentParsedResult, {
+      target: "image",
+      rewriteDirection: getRewriteDirectionValue(),
+      imageDirection,
+    });
+
+    if (requestId !== imagePromptRequestSerial) {
+      return;
+    }
+
+    resultImagePrompt.value =
+      aiPrompts.imagePrompt || (await buildImageGenerationPrompt(currentParsedResult, imageDirection));
+  } catch (error) {
+    if (requestId !== imagePromptRequestSerial) {
+      return;
+    }
+
+    resultImagePrompt.value = buildImagePromptFallback(currentParsedResult, imageDirection);
+    void hydrateImageGenerationPromptFallback(currentParsedResult, requestId, imageDirection);
+  } finally {
+    if (requestId === imagePromptRequestSerial) {
+      setRegenerateButtonState(regenerateImagePromptButton, true, "重新生成");
+    }
+  }
+}
+
+function getRewriteDirectionValue() {
+  return typeof rewriteDirectionInput?.value === "string" ? rewriteDirectionInput.value.trim() : "";
+}
+
+function getImageDirectionValue() {
+  return typeof imageDirectionInput?.value === "string" ? imageDirectionInput.value.trim() : "";
+}
+
+function setRegenerateButtonState(button, enabled, text) {
+  if (!button) {
+    return;
+  }
+
+  button.disabled = !enabled;
+  button.textContent = text;
+  button.classList.toggle("is-busy", !enabled);
 }
 
 function syncMediaLinks(result) {
@@ -613,10 +755,10 @@ function renderImageLinks(urls) {
   });
 }
 
-function buildRewritePrompt(result) {
+function buildRewritePrompt(result, direction = "") {
   const profile = analyzeNoteProfile(result);
 
-  return [
+  const lines = [
     "请写一篇可直接发布的小红书笔记。",
     "要求：",
     "1. 新标题控制在18字内。",
@@ -639,64 +781,766 @@ function buildRewritePrompt(result) {
     "标题：",
     "正文：",
     "标签：",
-  ].join("\n");
+  ];
+
+  if (direction) {
+    lines.splice(
+      15,
+      0,
+      "",
+      "附加提示词方向（权重 0.5）：",
+      direction,
+      "生成时以 0.5 权重吸收以上方向要求。它用于中度调节标题、语气、结构和重点信息，但不能覆盖原始内容主轴。"
+    );
+  }
+
+  return lines.join("\n");
 }
 
-async function buildImageGenerationPrompt(result) {
+async function buildImageGenerationPrompt(result, direction = "") {
   const profile = analyzeNoteProfile(result);
   const imageUrls = collectPromptAnalysisImageUrls(result);
 
   if (!imageUrls.length) {
-    return buildImagePromptFallback(result);
+    return buildImagePromptFallback(result, direction);
   }
 
   const scenes = await Promise.all(
     imageUrls.map((imageUrl, index) => analyzePromptImage(imageUrl, result, profile, index))
   );
 
-  const imageSections = scenes
-    .map((scene, index) => {
-      const serial = toChineseIndex(index + 1);
-      return [
-        `图${serial}`,
-        `风格：${scene.style}`,
-        `构图：${scene.composition}`,
-        `景别与机位：${scene.camera}`,
-        `背景：${scene.background}`,
-        `光线：${scene.light}`,
-        `色彩：${scene.color}`,
-        `材质与质感：${scene.material}`,
-        `主体与道具细节：${scene.details}`,
-        `文字与版式（如有）：${scene.typography}`,
-        `氛围关键词：${scene.mood}`,
-        "产品主体保持要求：保留你上传产品图的外形、比例、品牌与文字信息，只迁移本图的场景、构图、机位、光线和色彩。",
-        `复刻 prompt（产品融合版）：${scene.prompt}`,
-        `负面提示：${scene.negative}`,
-        `参数建议：${scene.params}`,
-      ].join("\n");
-    })
-    .join("\n\n---\n\n");
-
-  return [
-    "以下内容为基于解析图片逐张完成的视觉分析结果。",
-    "每一段都对应原帖中的单独一张图，可直接配合你上传的产品图使用。",
-    "",
-    imageSections,
-  ].join("\n");
+  return buildSceneTransferTemplateFromScenes(result, profile, scenes, direction);
 }
 
 function collectPromptAnalysisImageUrls(result) {
   return collectRenderableImageUrls(result);
 }
 
-function buildImagePromptFallback(result) {
+function buildImagePromptFallback(result, direction = "") {
   const profile = analyzeNoteProfile(result);
+  const imageCount = Math.max(collectPromptAnalysisImageUrls(result).length, 1);
+  const scenes = Array.from({ length: imageCount }, (_, index) => ({
+    ...buildSceneProfileFallback(result, profile, index),
+    index,
+  }));
+
+  return buildSceneTransferTemplateFromScenes(result, profile, scenes, direction, {
+    isFallback: true,
+  });
+}
+
+function buildSceneTransferTemplate(result, direction = "") {
+  const profile = analyzeNoteProfile(result);
+  const theme = inferSceneTransferTemplateTheme(result, profile);
+  const vars = WORKFLOW_TEMPLATE_VARIABLES;
+
   return [
-    "当前未能完成逐张视觉分析，已切换为保守兜底提示词。",
-    `内容主题：${profile.topicPosition}`,
-    `主体类型：${profile.subjectFocus}`,
-    "复刻 prompt（产品融合版）：保留你上传产品图的外形、比例、品牌与文字信息，仅迁移参考图的构图、背景层次、光线、色彩和氛围，生成真实自然的高质量实拍效果。",
+    "【变量占位（固定保留）】",
+    `- 正文内容：${vars.content}`,
+    `- 主体产品图/场景图列表：${vars.imageList}`,
+    `- 标题：${vars.title}`,
+    `- 主体产品图首图：${vars.firstImage}`,
+    `- LOGO参考：${vars.logoHint}`,
+    `- 禁用LOGO：${vars.forbiddenLogo}`,
+    "",
+    "【核心主题】",
+    `以标题“${vars.title}”为核心，结合正文“${vars.content}”和产品图“${vars.firstImage}”，LOGO“${vars.logoHint}”作为依据生成${theme.outputLabel}。`,
+    "",
+    "【生成参数】",
+    "- 生成图片数量：7 张，7种风格各生成1张",
+    "- 图片比例：9:16 竖图",
+    "- 输出要求：每张图独立风格，不混合、不简化，统一视觉调性；**图片中不得出现任何文字、LOGO、标签、贴纸类元素**；**强化真实生活感，弱化AI合成感**",
+    `- 产品保持基准：主体产品以“${vars.firstImage}”为唯一依据，不变形、不变色、不增删元素/文字`,
+    `- 场景参考输入：主体产品图/场景图列表统一引用“${vars.imageList}”`,
+    ...(direction ? [`- 额外方向（权重 0.5）：${direction}`, "- 方向吸收规则：只中度影响风格强调和氛围包装，不覆盖产品保持规则与七种场景骨架。"] : []),
+    "",
+    "【7种风格精准规范（可复用）】",
+    "---",
+    "### 风格1：车内随拍生活风（通勤日常·真实手机抓拍）",
+    "#### 背景层",
+    "1. 底色：**冷调灰蓝到浅灰渐变**，真实汽车内饰纹理，细腻皮革与塑料质感，无反光过度",
+    "2. 光线：柔和阴天自然光从侧窗斜射进入，形成柔和明暗过渡，无硬阴影",
+    "3. 环境细节：车门扶手、安全带卡扣、副驾位置轻微虚化，窗外街道、树木、车辆呈现自然动态模糊，远处行人轮廓模糊可见，营造真实通勤街景氛围",
+    "",
+    "#### 产品层",
+    `核心主体：${theme.productLabel}，无任何LOGO、贴纸、文字，主体占比45%，表面带自然使用痕迹、轻微水汽或指纹痕迹，质感真实可感`,
+    "构图：素人单手自然持握，手臂入镜一半，镜头贴近车窗，轻微倾斜角度，模拟随手抓拍",
+    "光影：主体表面呈现柔和反光，无夸张高光，无塑料感",
+    "",
+    "#### 氛围强化",
+    "- 全图加入**轻微胶片颗粒感**，模拟 iPhone 原生相机直出",
+    "- 色彩偏冷白、低饱和，无过度磨皮，无AI完美感",
+    "- 背景保持自然虚化，人物、车辆、街景均为模糊动态效果",
+    "",
+    "---",
+    "### 风格2：阳光治愈户外风（公园树荫·温柔自然光）",
+    "#### 背景层",
+    "1. 底色：**浅绿到米白渐变**，真实草地、石板路、树皮纹理自然融合",
+    "2. 光线：午后侧逆光，树叶形成**斑驳光影**洒在地面与主体表面，光感温柔通透",
+    "3. 环境细节：草丛、落叶、树枝轻微虚化，远处行人、散步身影模糊可见，营造松弛公园氛围",
+    "",
+    "#### 产品层",
+    `核心主体：${theme.productLabel}，无LOGO无贴纸，主体占比45%，表面带自然水珠、反光或细微质感变化`,
+    "构图：素人双手轻握，手臂自然入镜，平视微仰角度，松弛不刻意",
+    "光影：柔和透光感，主体半透明或高光层次自然，不做硬质广告光",
+    "",
+    "#### 氛围强化",
+    "- 暖调低饱和，轻微柔焦",
+    "- 加入真实环境噪点，无AI光滑感",
+    "- 背景保持浅景深虚化，突出主体",
+    "",
+    "---",
+    "### 风格3：门店氛围打卡风（商圈店内·真实到店感）",
+    "#### 背景层",
+    "1. 底色：**暖白到浅灰渐变**，店内大理石台面、木质柜体真实纹理",
+    "2. 光线：店内暖光射灯 + 环境漫反射，光线柔和不刺眼",
+    "3. 环境细节：模糊的店内顾客身影、店员动作轮廓、远处吧台设备虚化，营造热闹但不杂乱的真实门店氛围",
+    "",
+    "#### 产品层",
+    `核心主体：${theme.productLabel}，无LOGO无贴纸，主体占比45%，主体轮廓完整清晰`,
+    "构图：单手持物，手臂自然入镜，轻微仰拍，模拟到店随手拍",
+    "光影：柔和店内反光，无夸张高光，质感自然",
+    "",
+    "#### 氛围强化",
+    "- 暖调轻微泛黄，保持真实店内色温",
+    "- 轻微颗粒，浅景深虚化",
+    "- 背景人物动态模糊，无僵硬AI感",
+    "",
+    "---",
+    "### 风格4：新中式禅意窗景风（庭院窗边·东方静谧感）",
+    "#### 背景层",
+    "1. 底色：**原木深棕到浅灰渐变**，实木桌面、宣纸、窗棂纹理细腻真实",
+    "2. 光线：柔和窗景漫射光，无直射，安静温润",
+    "3. 环境细节：窗外庭院绿植、白墙灰瓦轻微虚化，室内花瓶、枯枝、陶瓷器皿简约点缀，营造东方静谧氛围",
+    "",
+    "#### 产品层",
+    `核心主体：${theme.productLabel}，无LOGO无文字，质感温润，占比45%`,
+    "构图：桌面平视构图，安静摆放，无手持动作",
+    "光影：柔和阴影，层次干净雅致",
+    "",
+    "#### 氛围强化",
+    "- 低饱和、灰调温润色彩",
+    "- 轻微胶片颗粒，无锐化过度",
+    "- 画面干净、安静、真实不做作",
+    "",
+    "---",
+    "### 风格5：城市街头元气风（斑马线街拍·年轻活力）",
+    "#### 背景层",
+    "1. 底色：**浅灰到深灰渐变**，真实柏油马路、斑马线纹理清晰自然",
+    "2. 光线：晴天正面自然光，明亮清爽",
+    "3. 环境细节：街道、建筑、行人、自行车、路灯全部自然虚化，营造城市街头活力氛围",
+    "",
+    "#### 产品层",
+    `核心主体：${theme.productLabel}，无LOGO无贴纸，占比45%，整体清晰完整`,
+    "构图：双手持物，街头平视角度，自然松弛",
+    "光影：明亮干净，轻微反光，真实塑料、玻璃、纸面或金属质感",
+    "",
+    "#### 氛围强化",
+    "- 高明亮度、低对比、轻微冷调",
+    "- 街头随拍颗粒感",
+    "- 背景动态模糊，无AI僵硬感",
+    "",
+    "---",
+    "### 风格6：艺术轻奢服务风（店内服务视角·高级简约）",
+    "#### 背景层",
+    "1. 底色：**深灰到银灰渐变**，金属架、亚克力板、墙面质感高级细腻",
+    "2. 光线：顶光 + 环境柔光，明暗层次高级",
+    "3. 环境细节：空白纸杯或包装盒堆叠、店员袖口、简约绿植虚化，营造轻奢店内氛围",
+    "",
+    "#### 产品层",
+    `核心主体：${theme.productLabel}，无LOGO无文字，占比40%，主体边缘锐利但不过分精修`,
+    "构图：店员递物视角，手部入镜，平视构图",
+    "光影：细腻金属反光与表面质感，无夸张特效",
+    "",
+    "#### 氛围强化",
+    "- 低饱和、高级灰调",
+    "- 轻微细腻颗粒",
+    "- 背景浅景深，突出高级感",
+    "",
+    "---",
+    "### 风格7：新中式清新国风（户外轻国风·温柔干净）",
+    "#### 背景层",
+    "1. 底色：**米白到浅灰渐变**，干净路面、墙面、植物纹理自然",
+    "2. 光线：明亮柔光，无硬阴影",
+    "3. 环境细节：素人衣摆、路边花草、远处行人模糊，营造清新国风户外感",
+    "",
+    "#### 产品层",
+    `核心主体：${theme.productLabel}，无LOGO无贴纸，占比45%，画面重心稳定`,
+    "构图：双手持握或轻摆放，温柔平视角度",
+    "光影：干净通透，柔和自然",
+    "",
+    "#### 氛围强化",
+    "- 清新低饱和，暖调柔和",
+    "- 真实手机实拍颗粒",
+    "- 背景自然虚化，无AI完美感",
+    "",
+    "【终极禁用规则（绝对执行）】",
+    "1. **严格禁止图片中出现任何文字、LOGO、标签、贴纸、二维码、装饰性文字元素**，背景文字需完全模糊至不可辨认",
+    "2. 禁止日期、网址、二维码、乱彩符号、多余装饰文字",
+    "3. 产品必须为核心视觉主体，占比≥40%，清晰完整不被遮挡",
+    "4. 禁止过度干净或完美的AI质感，必须加入**环境噪点、轻微模糊、动态人物、真实生活细节**强化实拍感",
+    "5. 色彩严格匹配场景：车内风=冷灰蓝；户外风=暖绿；门店风=暖白；禅意风=原木灰；街头风=冷灰；轻奢风=深灰；国风=米白浅灰",
+    `6. 禁止LOGO「${vars.forbiddenLogo}」在画面中以任何形式展示`,
+    `7. 禁止产品图「${vars.firstImage}」变形、变色、增删元素/文字`,
+    "8. 禁止出现乱码、文字不清晰！禁止出现乱码、文字不清晰！禁止出现乱码、文字不清晰！",
   ].join("\n");
+}
+
+function buildSceneTransferTemplateFromScenes(result, profile, scenes, direction = "", options = {}) {
+  const theme = inferSceneTransferTemplateTheme(result, profile);
+  const vars = WORKFLOW_TEMPLATE_VARIABLES;
+  const normalizedScenes = Array.isArray(scenes) && scenes.length
+    ? scenes.map((scene, index) => ({ ...scene, index }))
+    : [{ ...buildSceneProfileFallback(result, profile, 0), index: 0 }];
+  return normalizedScenes
+    .map((scene, index) => buildSceneTransferStyleBlock(scene, index, theme, vars, direction, options))
+    .join("\n\n");
+}
+
+function buildSceneTransferStyleBlock(scene, index, theme, vars, direction = "", options = {}) {
+  const styleName = inferSceneTransferStyleName(scene);
+  const productRatio = inferSceneTransferProductRatio(scene);
+  const environmentDetails = buildSceneTransferEnvironmentDetail(scene);
+  const analysisSummary = buildSceneTransferAnalysisSummary(scene, theme, styleName);
+  const spatialStyle = buildSceneTransferSpatialStyle(scene, styleName, environmentDetails);
+  const coreElements = buildSceneTransferCoreElements(scene, theme, environmentDetails);
+  const atmosphere = buildSceneTransferAtmosphere(scene, options);
+  const finalPrompt = buildSceneTransferFinalPrompt(scene, theme, vars, productRatio, direction);
+  const params = buildSceneTransferPromptParams(scene);
+  const negative = buildSceneTransferPromptNegative(scene);
+
+  return [
+    buildSceneTransferImageHeading(index + 1),
+    "🌿 图片风格与元素分析",
+    `${analysisSummary}`,
+    `- 空间风格：${spatialStyle}`,
+    `- 核心元素：${coreElements}`,
+    `- 光线与色彩：${scene.light}，${scene.color}`,
+    `- 构图与视角：${scene.composition}，${scene.camera}`,
+    `- 氛围：${atmosphere}`,
+    "",
+    "✍️ 可复用 Prompt 模板（支持变量替换）",
+    "```markdown",
+    finalPrompt,
+    "```",
+    `补充约束：${negative}；${params}`,
+  ].join("\n");
+}
+
+function buildSceneTransferFinalPrompt(scene, theme, vars, productRatio, direction = "") {
+  const styleEnglish = mapStyleNameToEnglish(scene);
+  const backgroundEnglish = buildBackgroundPromptEnglish(scene);
+  const lightEnglish = buildLightPromptEnglish(scene);
+  const colorEnglish = buildColorPromptEnglish(scene);
+  const compositionEnglish = buildCompositionPromptEnglish(scene);
+  const materialEnglish = buildMaterialPromptEnglish(scene);
+  const moodEnglish = buildMoodPromptEnglish(scene);
+  const directionEnglish = direction ? `, subtly infused with ${direction}` : "";
+
+  return [
+    `photorealistic ${styleEnglish}${directionEnglish}, featuring the uploaded ${theme.productPromptLabel} from ${vars.productImageList},`,
+    "preserve the product's original shape, proportions, branding, and text details exactly as uploaded,",
+    `${compositionEnglish},`,
+    `${backgroundEnglish},`,
+    `${lightEnglish},`,
+    `${colorEnglish},`,
+    `${materialEnglish},`,
+    `${moodEnglish},`,
+    `product occupies about ${productRatio} of the frame, realistic lifestyle photography, highly detailed, natural texture,`,
+    "no distorted product, no altered brand text, no extra stickers, no unrelated text overlays, no obvious AI artifacts,",
+    "--ar 3:4 --style raw",
+  ].join(" ");
+}
+
+function buildSceneTransferAnalysisSummary(scene, theme, styleName) {
+  const sceneType = describeSceneTypeForAnalysis(scene);
+  return `这张图是${styleName}的${sceneType}${theme.productSceneLabel}场景参考图，核心特征如下：`;
+}
+
+function describeSceneTypeForAnalysis(scene) {
+  if (/夜间/.test(scene.background) || /夜间/.test(scene.light)) {
+    return "夜间门店或街景";
+  }
+
+  if (/门店|吧台/.test(scene.background)) {
+    return "门店吧台";
+  }
+
+  if (/户外|街景|道路|自然环境/.test(scene.background)) {
+    return "户外生活方式";
+  }
+
+  if (/桌面|简洁室内/.test(scene.background)) {
+    return "静物桌面";
+  }
+
+  return "室内空间";
+}
+
+function buildSceneTransferSpatialStyle(scene, styleName, environmentDetails) {
+  return `${styleName}，${scene.background}，${environmentDetails}`;
+}
+
+function buildSceneTransferCoreElements(scene, theme, environmentDetails) {
+  return [
+    `${theme.productSceneLabel}主体需要自然落入${scene.background}`,
+    `${scene.material}`,
+    environmentDetails.replace(/。$/, ""),
+  ].join("，");
+}
+
+function buildSceneTransferAtmosphere(scene, options = {}) {
+  const fallbackText = options.isFallback ? "，当前为结构化兜底分析" : "";
+  return `${scene.mood}，${scene.details.replace(/。$/, "")}${fallbackText}`;
+}
+
+function buildSceneTransferPromptParams(scene) {
+  const normalized = String(scene.params || "")
+    .replace(/^画幅\s*[^，]+，?/, "")
+    .replace(/。$/, "")
+    .trim();
+
+  return normalized || "写实优先，细节优先，真实相机质感优先";
+}
+
+function buildSceneTransferPromptNegative(scene) {
+  const base = [
+    "避免产品主体变形或比例失真",
+    "避免品牌与文字信息被改写或糊掉",
+    "避免光线失真和明显 AI 拼接感",
+  ];
+
+  if (/夜间/.test(scene.background) || /夜间/.test(scene.light)) {
+    base.push("避免暗部死黑和脏噪点");
+  }
+
+  return base.join("、");
+}
+
+function mapStyleNameToEnglish(scene) {
+  const styleName = inferSceneTransferStyleName(scene);
+
+  if (/夜景/.test(styleName)) {
+    return "nighttime lifestyle scene";
+  }
+
+  if (/门店/.test(styleName)) {
+    return "modern cafe interior scene";
+  }
+
+  if (/户外/.test(styleName)) {
+    return "outdoor lifestyle scene";
+  }
+
+  if (/空间结构/.test(styleName)) {
+    return "minimalist architectural interior scene";
+  }
+
+  if (/静物/.test(styleName)) {
+    return "refined tabletop still-life scene";
+  }
+
+  return "lifestyle product scene";
+}
+
+function buildBackgroundPromptEnglish(scene) {
+  if (/夜间环境背景/.test(scene.background)) {
+    return "nighttime storefront setting with ambient shop lights, street bokeh, and layered shadows";
+  }
+
+  if (/门店|吧台/.test(scene.background)) {
+    return "cafe counter setting with subtle environmental depth and realistic interior context";
+  }
+
+  if (/室内空间背景/.test(scene.background)) {
+    return "minimalist indoor space with architectural lines, counter area, and visible spatial depth";
+  }
+
+  if (/户外街景或自然环境背景/.test(scene.background)) {
+    return "outdoor setting with greenery, open air, and natural spatial depth";
+  }
+
+  if (/户外街景或道路背景/.test(scene.background)) {
+    return "outdoor street-side setting with natural environmental context";
+  }
+
+  if (/桌面|简洁室内/.test(scene.background)) {
+    return "clean tabletop or pared-back interior setting";
+  }
+
+  return "realistic lifestyle environment with layered foreground and background";
+}
+
+function buildLightPromptEnglish(scene) {
+  if (/夜间暖色人工光/.test(scene.light)) {
+    return "warm artificial night lighting with atmospheric highlights";
+  }
+
+  if (/夜间冷色环境光/.test(scene.light)) {
+    return "cool nighttime ambient light with preserved shadow detail";
+  }
+
+  if (/自然散射光/.test(scene.light)) {
+    return "soft diffused natural light";
+  }
+
+  if (/自然日光更直接/.test(scene.light)) {
+    return "clear natural daylight with defined highlights and shadows";
+  }
+
+  if (/室内偏暖环境光/.test(scene.light)) {
+    return "soft warm indoor light with gentle highlight rolloff";
+  }
+
+  if (/室内偏冷环境光/.test(scene.light)) {
+    return "clean cool indoor lighting with controlled contrast";
+  }
+
+  return "soft ambient interior light with balanced highlights and shadows";
+}
+
+function buildColorPromptEnglish(scene) {
+  return translateColorDescriptionToEnglish(scene.color);
+}
+
+function buildCompositionPromptEnglish(scene) {
+  const parts = [];
+
+  if (/画面中心/.test(scene.composition)) {
+    parts.push("centered composition");
+  } else if (/偏左/.test(scene.composition)) {
+    parts.push("left-weighted composition");
+  } else if (/偏右/.test(scene.composition)) {
+    parts.push("right-weighted composition");
+  }
+
+  if (/焦点区与环境比例平衡/.test(scene.composition)) {
+    parts.push("balanced subject-to-environment ratio");
+  } else if (/保留较多环境信息/.test(scene.composition)) {
+    parts.push("wider framing with more environmental context");
+  } else if (/焦点区域占比高/.test(scene.composition)) {
+    parts.push("subject-forward framing");
+  }
+
+  if (/近景特写/.test(scene.camera)) {
+    parts.push("close-up shot");
+  } else if (/中近景/.test(scene.camera)) {
+    parts.push("medium close-up shot");
+  } else if (/中景/.test(scene.camera)) {
+    parts.push("medium shot");
+  }
+
+  if (/平视机位/.test(scene.camera)) {
+    parts.push("eye-level view");
+  } else if (/略俯视机位/.test(scene.camera)) {
+    parts.push("slightly top-down view");
+  } else if (/略仰视机位/.test(scene.camera)) {
+    parts.push("slightly low-angle view");
+  }
+
+  if (/背景轻虚化/.test(scene.camera)) {
+    parts.push("soft background blur");
+  } else if (/景深偏深/.test(scene.camera)) {
+    parts.push("deeper depth of field");
+  }
+
+  return parts.join(", ");
+}
+
+function buildMaterialPromptEnglish(scene) {
+  if (/玻璃、金属、路面或墙面/.test(scene.material)) {
+    return "realistic glass and metal reflections with textured surfaces";
+  }
+
+  if (/玻璃、金属、木质、织物/.test(scene.material)) {
+    return "clear layers of glass, metal, wood, and fabric textures";
+  }
+
+  if (/木质、织物、纸面、墙面/.test(scene.material)) {
+    return "realistic wood, fabric, paper, and wall textures";
+  }
+
+  if (/墙面、路面、绿植/.test(scene.material)) {
+    return "natural wall, ground, and greenery textures";
+  }
+
+  return "realistic material texture and natural surface detail";
+}
+
+function buildMoodPromptEnglish(scene) {
+  const translatedMood = translateMoodDescriptionToEnglish(scene.mood);
+  return translatedMood ? `${translatedMood} mood` : "calm lifestyle atmosphere";
+}
+
+function translateColorDescriptionToEnglish(text) {
+  const replacements = [
+    ["以", ""],
+    ["为主", " palette"],
+    ["整体偏暖", "overall warm tone"],
+    ["整体偏冷", "overall cool tone"],
+    ["整体偏中性", "overall neutral tone"],
+    ["饱和度克制", "restrained saturation"],
+    ["饱和度适中", "moderate saturation"],
+    ["颜色存在明显主次对比", "clear color hierarchy"],
+    ["深灰", "deep gray"],
+    ["浅灰", "light gray"],
+    ["深黑", "charcoal black"],
+    ["橙色", "muted orange"],
+    ["浅橙", "soft orange"],
+    ["黄色", "warm yellow"],
+    ["绿色", "green"],
+    ["蓝色", "blue"],
+    ["米白", "off-white"],
+    ["浅绿", "light green"],
+    ["深棕", "dark brown"],
+    ["，", ", "],
+    ["、", ", "],
+  ];
+
+  let output = String(text || "");
+  replacements.forEach(([from, to]) => {
+    output = output.replaceAll(from, to);
+  });
+
+  return output.replace(/\s+/g, " ").trim();
+}
+
+function translateMoodDescriptionToEnglish(text) {
+  const replacements = [
+    ["夜间", "nighttime"],
+    ["氛围感", "atmospheric"],
+    ["真实", "authentic"],
+    ["有情绪张力", "emotionally rich"],
+    ["现代", "modern"],
+    ["清爽", "clean"],
+    ["空间感明确", "spacious"],
+    ["真实、自然、内容感强", "natural, authentic, editorial"],
+    ["自然", "natural"],
+    ["日常", "everyday"],
+    ["松弛", "relaxed"],
+    ["清透", "airy"],
+    ["轻松", "light"],
+    ["在场感强", "immersive"],
+    ["克制", "restrained"],
+    ["干净", "clean"],
+    ["可信赖", "trustworthy"],
+    ["、", ", "],
+  ];
+
+  let output = String(text || "");
+  replacements.forEach(([from, to]) => {
+    output = output.replaceAll(from, to);
+  });
+
+  return output.replace(/\s+/g, " ").trim();
+}
+
+function buildSceneTransferUnifiedTone(theme, direction = "", options = {}) {
+  const baseTone = theme.unifiedTone;
+  const directionText = direction ? `，整体中度吸收“${direction}”的表达倾向` : "";
+  const fallbackText = options.isFallback ? "，优先保证模板完整和主体产品不被篡改" : "";
+  return `${baseTone}${directionText}${fallbackText}`;
+}
+
+function buildSceneTransferImageHeading(index) {
+  return `【图${numberToChineseText(index)}】`;
+}
+
+function numberToChineseText(value) {
+  const digits = ["零", "一", "二", "三", "四", "五", "六", "七", "八", "九"];
+
+  if (value <= 10) {
+    if (value === 10) {
+      return "十";
+    }
+
+    return digits[value] || String(value);
+  }
+
+  if (value < 20) {
+    return `十${digits[value % 10]}`;
+  }
+
+  const tens = Math.floor(value / 10);
+  const units = value % 10;
+  return `${digits[tens]}十${units ? digits[units] : ""}`;
+}
+
+function buildSceneTransferSubjectDetails(scene, theme, productRatio, environmentDetails) {
+  return [
+    `以用户上传产品图中的${theme.productSceneLabel}为唯一主体，主体占比建议${productRatio}`,
+    `结合${scene.background}的空间关系与${scene.material}`,
+    scene.details.replace(/。$/, ""),
+    environmentDetails.replace(/。$/, ""),
+  ].join("，");
+}
+
+function buildSceneTransferTypography(scene) {
+  if (typeof scene.typography === "string" && scene.typography.trim()) {
+    return "无明显额外版式文字，若场景中原有招牌或海报仅作为弱化背景信息处理，不新增文案贴片";
+  }
+
+  return "无";
+}
+
+function buildSceneTransferTemplateNegative(scene) {
+  const parts = [
+    "避免产品主体变形或比例失真",
+    "避免品牌与文字信息被改写、错字、缺失或糊掉",
+    "避免主体被道具遮挡或喧宾夺主",
+    "避免整体画面出现明显 AI 拼接感",
+  ];
+
+  if (/夜间/.test(scene.mood) || /夜间/.test(scene.light)) {
+    parts.push("避免暗部死黑、脏噪点和高光过曝");
+  } else {
+    parts.push("避免光线不均、过曝或阴影过重");
+  }
+
+  if (/暖/.test(scene.color)) {
+    parts.push("避免色彩过黄或过艳");
+  } else {
+    parts.push("避免色彩发灰、失真或偏色");
+  }
+
+  return parts.join("、");
+}
+
+function buildSceneTransferTemplateParams(scene) {
+  const normalized = String(scene.params || "")
+    .replace(/^画幅\s*[^，]+，?/, "")
+    .replace(/。$/, "")
+    .trim();
+
+  return normalized ? `分辨率1080p，${normalized}` : "分辨率1080p，写实优先，细节优先";
+}
+
+function inferSceneTransferStyleName(scene) {
+  const combined = [scene.style, scene.background, scene.light, scene.color, scene.mood].join(" ");
+
+  if (/夜间|街景光斑/.test(combined)) {
+    return "夜景氛围纪实风";
+  }
+
+  if (/门店|吧台/.test(combined)) {
+    return "门店氛围打卡风";
+  }
+
+  if (/天空|绿植|户外/.test(combined)) {
+    return "户外自然治愈风";
+  }
+
+  if (/建筑线条|结构透视|空间线条/.test(combined)) {
+    return "空间结构叙事风";
+  }
+
+  if (/桌面|简洁室内/.test(combined)) {
+    return "静物陈列质感风";
+  }
+
+  if (/暖/.test(combined)) {
+    return "暖调生活方式风";
+  }
+
+  if (/冷/.test(combined)) {
+    return "冷调纪实随拍风";
+  }
+
+  return "真实生活方式分享风";
+}
+
+function inferSceneTransferProductRatio(scene) {
+  const spreadX = Number.isFinite(scene.spreadX) ? scene.spreadX : 0.25;
+  const spreadY = Number.isFinite(scene.spreadY) ? scene.spreadY : 0.25;
+  const averageSpread = (spreadX + spreadY) / 2;
+
+  if (averageSpread <= 0.18) {
+    return "45%-50%";
+  }
+
+  if (averageSpread <= 0.28) {
+    return "40%-45%";
+  }
+
+  return "35%-40%";
+}
+
+function buildSceneTransferEnvironmentDetail(scene) {
+  if (/门店|吧台/.test(scene.background)) {
+    return "保留店内人流、柜台、器具或空间纵深的轻微虚化感，形成真实到店氛围";
+  }
+
+  if (/天空|绿植|道路|街景|户外/.test(scene.background)) {
+    return "保留路面、植物、建筑或远处人物的自然虚化，不做过度干净的广告背景";
+  }
+
+  if (/桌面|简洁室内/.test(scene.background)) {
+    return "保留桌面、墙面、器皿或陈列关系的真实纹理，让画面有可感知的生活细节";
+  }
+
+  return "保留前景、中景、背景的空间层次和辅助元素，让场景保持真实生活感";
+}
+
+function buildSceneTransferAtmosphereDetail(scene) {
+  if (/夜间/.test(scene.mood)) {
+    return "加入轻微噪点和夜景颗粒，保留情绪张力，但不要出现死黑和脏噪点。";
+  }
+
+  if (/清透|轻松|松弛/.test(scene.mood)) {
+    return "保留松弛、轻透、自然的手机随拍感，弱化摆拍和过度修图痕迹。";
+  }
+
+  if (/克制|干净|可信赖/.test(scene.mood)) {
+    return "保持画面干净克制，但不要干净到失去真实使用痕迹。";
+  }
+
+  return "保留真实生活方式内容的轻微噪点、细节痕迹和自然景深，不要出现僵硬 AI 感。";
+}
+
+function formatSceneTransferMapping(count) {
+  return Array.from({ length: count }, (_, index) => `风格${index + 1}->抓取图${index + 1}`).join("，");
+}
+
+function inferSceneTransferTemplateTheme(result, profile) {
+  const combined = buildAnalysisText(result);
+
+  if (/(咖啡|拿铁|美式|奶茶|果茶|茶饮|饮品|柠檬茶|奶盖)/.test(combined)) {
+    return {
+      outputLabel: "**素人实拍感**的新茶饮/咖啡分享图",
+      productLabel: "真实质感饮品杯",
+      productSceneLabel: "茶饮",
+      productPromptLabel: "tea or coffee drink product",
+      unifiedTone: "清新治愈/高级简约风格，店铺高级感场景全景图+茶饮特写图+第一视角松弛感打卡图",
+    };
+  }
+
+  if (/(护肤|精华|面霜|水乳|彩妆|口红|粉底|香水)/.test(combined)) {
+    return {
+      outputLabel: "**素人实拍感**的护肤/彩妆产品分享图",
+      productLabel: "真实质感产品包装",
+      productSceneLabel: "护肤/彩妆产品",
+      productPromptLabel: "skincare or makeup product",
+      unifiedTone: "清新治愈/高级简约风格，梳妆台或店铺高级感场景全景图+护肤/彩妆产品特写图+第一视角松弛感打卡图",
+    };
+  }
+
+  if (/(包包|鞋子|穿搭|单品|服装|饰品|配件)/.test(combined)) {
+    return {
+      outputLabel: "**素人实拍感**的单品种草分享图",
+      productLabel: "真实质感主体单品",
+      productSceneLabel: "主体单品",
+      productPromptLabel: "fashion or lifestyle item",
+      unifiedTone: "清新治愈/高级简约风格，空间氛围场景全景图+主体单品特写图+第一视角松弛感打卡图",
+    };
+  }
+
+  return {
+    outputLabel: `**素人实拍感**的${profile.topicPosition}产品场景分享图`,
+    productLabel: "真实质感主体产品",
+    productSceneLabel: "主体产品",
+    productPromptLabel: "product",
+    unifiedTone: "清新治愈/高级简约风格，高级感场景全景图+主体产品特写图+第一视角松弛感打卡图",
+  };
 }
 
 async function analyzePromptImage(imageUrl, result, profile, index) {
@@ -939,9 +1783,9 @@ function buildSceneProfileFromVisual(result, profile, visual, index) {
   const background = describeVisualBackground(result, profile, visual);
   const light = describeVisualLighting(visual);
   const color = describeVisualColor(visual);
-  const material = describeVisualMaterial(profile, visual);
-  const details = describeVisualDetails(profile, visual);
-  const typography = "若产品本身带品牌或文字信息，保持原样并确保清晰可读，不改字不乱码。";
+  const material = describeVisualMaterial(visual);
+  const details = describeVisualDetails(visual);
+  const typography = "若画面里有招牌、海报或版式文字，可概括其位置与排版节奏；若无则保持无文字。";
   const mood = describeVisualMood(visual);
   const prompt = buildVisualReplicaPrompt({
     composition,
@@ -952,7 +1796,6 @@ function buildSceneProfileFromVisual(result, profile, visual, index) {
     material,
     details,
     mood,
-    profile,
   });
 
   return {
@@ -969,6 +1812,8 @@ function buildSceneProfileFromVisual(result, profile, visual, index) {
     prompt,
     negative: buildVisualNegativePrompt(visual),
     params: buildVisualParamHint(visual),
+    spreadX: visual.spreadX,
+    spreadY: visual.spreadY,
     index,
   };
 }
@@ -984,19 +1829,21 @@ function buildSceneProfileFallback(result, profile) {
   return {
     style: fallbackStyle,
     composition: fallbackComposition,
-    camera: "中近景平视机位，主体清晰，背景轻微虚化",
+    camera: "中近景平视机位，视觉焦点清晰，背景轻微虚化",
     background: `围绕“${profile.topicPosition}”的真实生活场景`,
     light: fallbackLight,
     color: fallbackColor,
     material: fallbackMaterial,
-    details: "保留产品主体边缘、比例、品牌与文字信息，确保结构清楚不变形。",
-    typography: "若产品带有品牌或文字信息，保持原样并确保清晰可读。",
+    details: "保留清晰主体落位空间和前中后景层次，让主体产品嵌入后仍然自然可信。",
+    typography: "若画面存在招牌、海报或版式文字，描述其位置与密度；若无则保持无文字。",
     mood: fallbackMood,
     prompt:
-      "以你上传的产品为唯一主体，保留原有外形、比例、品牌与文字信息，只迁移参考图的场景、构图、机位、光线与色彩关系，生成真实自然的高质量实拍成片。",
+      "将主体产品自然融入当前场景风格中，保留构图、环境层次、机位、光线、配色与氛围特征，输出真实自然的高质量实拍成图。",
     negative:
-      "不要替换产品主体，不要改变产品外形比例，不要篡改品牌logo或文字，不要塑料感CG，不要过度磨皮，不要文字乱码。",
+      "不要出现第二个主产品，不要加入品牌logo或大段文字，不要塑料感CG，不要过度磨皮，不要文字乱码。",
     params: "画幅 3:4，写实强度中高，清晰度优先，细节优先。",
+    spreadX: 0.25,
+    spreadY: 0.25,
   };
 }
 
@@ -1010,7 +1857,7 @@ function describeVisualStyle(visual) {
   }
 
   if (visual.isCleanBackground) {
-    return "克制简洁的静物/产品实拍，画面干净";
+    return "克制简洁的商业场景摄影，画面干净";
   }
 
   if (visual.hasStructuredLines) {
@@ -1025,18 +1872,18 @@ function describeVisualComposition(visual) {
   const vertical = visual.centerY <= 0.38 ? "偏上" : visual.centerY >= 0.62 ? "偏下" : "居中";
   const placement =
     horizontal === "居中" && vertical === "居中"
-      ? "主体位于画面中心"
+      ? "视觉焦点位于画面中心"
       : horizontal === "居中"
-        ? `主体居中${vertical}`
+        ? `视觉焦点居中${vertical}`
         : vertical === "居中"
-          ? `主体${horizontal}`
-          : `主体${horizontal}${vertical}`;
+          ? `视觉焦点${horizontal}`
+          : `视觉焦点${horizontal}${vertical}`;
   const focusScale =
     (visual.spreadX + visual.spreadY) / 2 <= 0.18
-      ? "主体占比高，视觉焦点集中"
+      ? "焦点区域占比高，主视觉集中"
       : (visual.spreadX + visual.spreadY) / 2 <= 0.28
-        ? "主体与环境比例平衡"
-        : "保留较多环境信息，主体和场景共同成画";
+        ? "焦点区与环境比例平衡"
+        : "保留较多环境信息，场景层次更完整";
 
   return `${placement}，${focusScale}`;
 }
@@ -1045,7 +1892,7 @@ function describeVisualCamera(visual) {
   const spreadAverage = (visual.spreadX + visual.spreadY) / 2;
   const shotScale = spreadAverage <= 0.18 ? "近景特写" : spreadAverage <= 0.28 ? "中近景" : "中景";
   const angle = visual.centerY <= 0.38 ? "略仰视机位" : visual.centerY >= 0.62 ? "略俯视机位" : "平视机位";
-  const depth = visual.depthContrast >= 1.18 ? "主体清晰，背景轻虚化" : "整体清晰，景深偏深";
+  const depth = visual.depthContrast >= 1.18 ? "焦点区域清晰，背景轻虚化" : "整体清晰，景深偏深";
   return `${shotScale}，${angle}，${depth}`;
 }
 
@@ -1069,7 +1916,7 @@ function describeVisualBackground(result, profile, visual) {
   }
 
   if (visual.isCleanBackground) {
-    return "简洁室内或桌面背景，干扰元素少，主体更突出";
+    return "简洁室内或桌面环境，干扰元素少，主视觉承载区突出";
   }
 
   if (/(探店|门店|餐厅|咖啡馆|吧台)/.test(analysisText)) {
@@ -1089,7 +1936,7 @@ function describeVisualLighting(visual) {
   }
 
   if (visual.averageWarmth >= 12) {
-    return "室内偏暖环境光，亮部柔和，主体边缘有自然高光";
+    return "室内偏暖环境光，亮部柔和，焦点区域边缘有自然高光";
   }
 
   if (visual.averageWarmth <= -12) {
@@ -1106,38 +1953,40 @@ function describeVisualColor(visual) {
   return `以${palette}为主，${temperature}，${saturation}`;
 }
 
-function describeVisualMaterial(profile, visual) {
-  if (/(饮品|美食)/.test(profile.subjectFocus)) {
-    return "透明外壁、液体层次、表面高光和包装边缘要清楚，保留真实通透感";
+function describeVisualMaterial(visual) {
+  if (visual.isNight) {
+    return "玻璃、金属、路面或墙面等表面高光自然，暗部仍保有纹理";
   }
 
-  if (/(穿搭单品)/.test(profile.subjectFocus)) {
-    return "产品表面纹理、折痕、边缘反光和材质触感要真实";
-  }
-
-  if (/(人物)/.test(profile.subjectFocus)) {
-    return "产品主体的包装、边缘、反光与接触阴影要真实，避免悬浮感";
-  }
-
-  return visual.averageSaturation <= 0.22
-    ? "产品表面纹理、包装边缘和反光层次要清楚，整体质感克制真实"
-    : "产品主体的反光、纹理、边缘和材质层次要清楚，保留真实触感";
-}
-
-function describeVisualDetails(profile, visual) {
-  if (visual.depthContrast >= 1.18) {
-    return "保留参考图的焦点位置与背景虚化层次，让主体边缘清晰、背景退后。";
-  }
-
-  if (visual.hasStructuredLines) {
-    return "保留环境中的线条透视、结构层次和空间纵深，不要把背景做平。";
+  if (visual.isOutdoor) {
+    return visual.averageSaturation <= 0.22
+      ? "墙面、路面、绿植或空气层次的质感自然克制"
+      : "玻璃、植被、建筑和地面材质层次清楚，表面反光自然";
   }
 
   if (visual.isCleanBackground) {
-    return "减少无关道具，让主体轮廓、品牌与文字信息更醒目。";
+    return "台面、墙面或背景表面干净平整，反光克制，边缘清楚";
   }
 
-  return `保留${profile.subjectFocus}场景里常见的环境辅助元素，但不要喧宾夺主。`;
+  return visual.averageSaturation <= 0.22
+    ? "木质、织物、纸面、墙面等常见表面质感真实细腻"
+    : "玻璃、金属、木质、织物等材质层次清楚，保留真实触感";
+}
+
+function describeVisualDetails(visual) {
+  if (visual.depthContrast >= 1.18) {
+    return "保留清晰焦点区与背景虚化层次，让主体产品稳定落在清晰焦点区，背景自然后退。";
+  }
+
+  if (visual.hasStructuredLines) {
+    return "保留环境中的线条透视、结构层次和空间纵深，让主体产品嵌入后依然可信，不要把背景做平。";
+  }
+
+  if (visual.isCleanBackground) {
+    return "减少无关元素，保留干净留白，让主体产品成为稳定视觉中心。";
+  }
+
+  return "保留前景、中景、背景的层次变化，并让辅助环境元素服务于主体产品与整体氛围。";
 }
 
 function describeVisualMood(visual) {
@@ -1162,24 +2011,24 @@ function describeVisualMood(visual) {
 
 function buildVisualReplicaPrompt(scene) {
   return [
-    "以你上传的产品为唯一主体，放在参考图主体所在的视觉焦点位置，",
+    "将主体产品自然融入一个真实生活方式场景中，",
     `${scene.composition}，${scene.camera}，`,
-    `背景为${scene.background}，`,
+    `空间环境为${scene.background}，`,
     `光线表现为${scene.light}，`,
-    `整体色彩${scene.color}，`,
-    "保留产品原有外形、比例、品牌与文字信息，",
+    `整体配色${scene.color}，`,
     `重点呈现${scene.material}，`,
     `${scene.details}`,
     `整体氛围${scene.mood}，`,
-    "输出真实自然、可直接用于社交媒体内容的高质量实拍成片。",
+    "输出真实自然、层次清楚、可直接用于最终产品场景迁移成图的高质量画面。",
   ].join("");
 }
 
 function buildVisualNegativePrompt(visual) {
   const parts = [
-    "不要替换产品主体",
-    "不要改变产品外形比例",
-    "不要篡改品牌logo或文字",
+    "不要出现第二个主产品",
+    "不要让人物喧宾夺主",
+    "不要出现与主体产品无关的抢镜食物、饮品或器物",
+    "不要加入品牌logo或无关文字",
     "不要文字乱码",
     "不要塑料感CG",
     "不要过度磨皮",
@@ -1191,11 +2040,11 @@ function buildVisualNegativePrompt(visual) {
   }
 
   if (visual.isOutdoor) {
-    parts.push("不要做成纯棚拍背景");
+    parts.push("不要做成纯棚拍白底");
   }
 
   if (visual.depthContrast >= 1.18) {
-    parts.push("不要让背景比主体还清晰");
+    parts.push("不要让背景比焦点区还清晰");
   } else {
     parts.push("不要把背景虚化过度");
   }
@@ -1479,15 +2328,15 @@ function inferImageStyleHint(result, profile) {
   const combined = buildAnalysisText(result);
 
   if (/(职场|面试|办公室|简历|上班|通勤)/.test(combined)) {
-    return "真实职场感的人像或场景图，偏自然纪实，干净明亮，像高质量生活方式内容配图";
+    return "真实职场场景摄影，偏自然纪实，干净明亮，像高质量生活方式内容配图";
   }
 
   if (/(教程|步骤|技巧|干货|攻略)/.test(combined)) {
-    return "信息感较强的生活方式视觉，画面清晰克制，重点明确，有轻微 editorial 感";
+    return "信息感较强的生活方式场景视觉，画面清晰克制，重点明确，有轻微 editorial 感";
   }
 
   if (/(穿搭|妆容|护肤|单品)/.test(combined)) {
-    return "精致但不过度修饰的生活方式审美，保留真实皮肤和材质质感";
+    return "精致但不过度修饰的审美场景摄影，保留真实材质和空间质感";
   }
 
   if (profile.categoryLabel === "经验分享") {
@@ -1502,18 +2351,18 @@ function inferImageCompositionHint(result, profile) {
   const imageCount = Array.isArray(result.images) ? result.images.length : 1;
 
   if (/(人物|女生|男生|博主|朋友|主理人)/.test(combined)) {
-    return "以单主体为核心的中近景或半身构图，主体清晰，背景简洁，有明确视觉焦点";
+    return "中近景或半身取景逻辑，视觉焦点明确，背景简洁，让主体产品和人物关系自然成立";
   }
 
   if (/(产品|单品|物品|护肤品|彩妆|包包|鞋子)/.test(combined)) {
-    return "主体居中偏前景，搭配少量辅助道具，层次清楚，留出适度呼吸感";
+    return "主视觉位于前景或中部，留白适中，层次清楚，主体产品落位明确";
   }
 
   if (imageCount >= 3) {
     return "参考组图里常见的封面式取景，优先选择稳定、清楚、易读的主画面构图";
   }
 
-  return `围绕${profile.subjectFocus}建立单一主视觉，保持主次分明、构图稳定、画面干净`;
+  return `构图稳定，主次分明，留出明确视觉焦点与环境空间，适合作为${profile.topicPosition}场景模板`;
 }
 
 function inferImageColorHint(result, profile) {
@@ -1528,7 +2377,7 @@ function inferImageColorHint(result, profile) {
   }
 
   if (/(护肤|彩妆|产品|单品|穿搭)/.test(combined)) {
-    return "主色明确，背景色干净，主体颜色和材质被突出，整体偏审美向";
+    return "主色明确，背景色干净，局部重点色被突出，整体偏审美向";
   }
 
   return `围绕“${profile.topicPosition}”形成统一而清楚的色彩组织，主次分明，不过度堆色`;
@@ -1542,14 +2391,14 @@ function inferImageLayoutHint(result, profile) {
   }
 
   if (/(职场|经验分享|面试|工作)/.test(combined)) {
-    return "整体偏内容封面逻辑，主体与背景关系清楚，有明显视觉中心，适合社媒首图";
+    return "整体偏内容封面逻辑，焦点区与背景关系清楚，有明显视觉中心，适合社媒首图";
   }
 
   if (/(产品|单品|护肤|彩妆|穿搭)/.test(combined)) {
-    return "版面偏审美陈列式，主体摆位有节奏，留白和细节辅助共同建立高级感";
+    return "版面偏审美陈列式，主视觉摆位有节奏，留白和细节辅助共同建立高级感";
   }
 
-  return `围绕${profile.subjectFocus}形成稳定的视觉层级，让主体、环境和辅助元素各自有清晰位置`;
+  return `围绕${profile.topicPosition}形成稳定的视觉层级，让焦点区、环境和辅助元素各自有清晰位置`;
 }
 
 function inferImageMediumHint(result, profile) {
@@ -1564,7 +2413,7 @@ function inferImageMediumHint(result, profile) {
   }
 
   if (/(人物|职场|通勤|面试|生活|经验分享)/.test(combined)) {
-    return "更接近真实生活方式实拍摄影，可保留轻微 editorial 感，但主体应自然可信";
+    return "更接近真实生活方式实拍摄影，可保留轻微 editorial 感，但主视觉应自然可信";
   }
 
   return `优先判断为与“${profile.topicPosition}”匹配的真实摄影或轻设计化视觉，不建议直接做重渲染风格`;
@@ -1574,36 +2423,36 @@ function inferImageLightingHint(result, profile) {
   const combined = buildAnalysisText(result);
 
   if (/(职场|办公室|通勤|人物|面试)/.test(combined)) {
-    return "自然光或柔和环境光为主，面部与主体轮廓清楚，避免过硬补光和影楼感";
+    return "自然光或柔和环境光为主，焦点区轮廓清楚，避免过硬补光和影楼感";
   }
 
   if (/(产品|护肤|彩妆|单品)/.test(combined)) {
-    return "受控柔光，亮部干净，阴影克制，重点突出主体材质和轮廓";
+    return "受控柔光，亮部干净，阴影克制，重点突出环境材质和轮廓";
   }
 
   if (/(餐厅|咖啡|探店|甜品|饮品)/.test(combined)) {
     return "生活方式场景光，整体柔和，有局部高光和空间氛围，不要死白平光";
   }
 
-  return `围绕${profile.subjectFocus}建立清楚、自然、可读的光线关系，亮部不过曝，暗部不糊成一片`;
+  return `围绕${profile.topicPosition}建立清楚、自然、可读的光线关系，亮部不过曝，暗部不糊成一片`;
 }
 
 function inferImageMaterialHint(result, profile) {
   const combined = buildAnalysisText(result);
 
   if (/(人物|女生|男生|博主|朋友)/.test(combined)) {
-    return "皮肤、发丝、服装面料与道具材质要真实可感，保留细节，不做塑料质感处理";
+    return "服装面料、桌面、墙面与空间材质要真实可感，保留细节，不做塑料质感处理";
   }
 
   if (/(产品|护肤|彩妆|单品|包包|鞋子)/.test(combined)) {
-    return "重点呈现产品表面、边缘、反光、纹理和材质层次，让主体具备商业级质感";
+    return "重点呈现玻璃、金属、纸面、木质等常见表面的反光、纹理和材质层次，让画面具备商业级质感";
   }
 
   if (/(甜品|饮品|美食|料理)/.test(combined)) {
-    return "食物纹理、液体透明感、器皿质地和桌面材质都要清楚，避免糊成一片";
+    return "桌面、液体、陶瓷、玻璃等表面质感都要清楚，避免糊成一片";
   }
 
-  return `突出${profile.subjectFocus}相关的真实材质与细节层次，让画面既清楚又有触感`;
+  return `突出与${profile.topicPosition}相符的真实材质与细节层次，让画面既清楚又有触感`;
 }
 
 function inferImageAtmosphereHint(result, profile) {
@@ -1628,7 +2477,7 @@ function inferImageQualityHint(result, profile) {
   const combined = buildAnalysisText(result);
 
   if (/(人物|职场|生活|经验分享|通勤)/.test(combined)) {
-    return "达到高质量社交媒体实拍封面图水准，人物比例自然，细节完整，画面干净，像成熟博主真实拍摄成片";
+    return "达到高质量社交媒体实拍封面图水准，比例自然，细节完整，画面干净，像成熟博主真实拍摄成片";
   }
 
   if (/(产品|护肤|彩妆|单品)/.test(combined)) {
@@ -1639,15 +2488,15 @@ function inferImageQualityHint(result, profile) {
     return "达到优质生活方式内容图水准，食物与环境都有真实质感，颜色诱人但不过饱和";
   }
 
-  return `整体质量要对齐高质量${profile.topicPosition}内容图：主体明确、细节充分、观感成熟、真实自然`;
+  return `整体质量要对齐高质量${profile.topicPosition}内容图：主次明确、细节充分、观感成熟、真实自然`;
 }
 
 function inferPromptDirectionHint(result, profile) {
   return [
-    `保留${profile.subjectFocus}的主体定位`,
+    "保留明确的主体落位空间",
     `沿用${profile.topicPosition}对应的视觉语境`,
     "复用风格、构图、用色、光线、材质和媒介属性的方法论，而不是复制原图细节",
-    "让不同帖子都能套用成同风格方向的高质量文生图模板"
+    "让不同帖子都能套用成同风格方向的高质量场景迁移模板"
   ].join("；");
 }
 
