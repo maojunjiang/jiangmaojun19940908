@@ -15,11 +15,17 @@ const AI_API_MODEL = String(process.env.AI_API_MODEL || "doubao-seed-2-0-pro-260
 const AI_CHAT_COMPLETIONS_PATH = String(
   process.env.AI_CHAT_COMPLETIONS_PATH || "/api/v3/chat/completions"
 ).trim();
+const MAX_AI_IMAGE_ANALYSIS_COUNT = 8;
 const GROBOTAI_PROMPT_PATH = String(
   process.env.GROBOTAI_PROMPT_PATH || "/api/agent/doubao_generate_character_wf"
 ).trim();
 const GROBOTAI_ENTERPRISE_ID = String(process.env.GROBOTAI_ENTERPRISE_ID || "").trim();
 const AI_REQUEST_TIMEOUT_MS = Number.parseInt(process.env.AI_REQUEST_TIMEOUT_MS || "90000", 10);
+const AI_REQUEST_RETRY_COUNT = Number.parseInt(process.env.AI_REQUEST_RETRY_COUNT || "2", 10);
+const AI_REQUEST_RETRY_DELAY_MS = Number.parseInt(
+  process.env.AI_REQUEST_RETRY_DELAY_MS || "1200",
+  10
+);
 
 const MIME_TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -43,6 +49,7 @@ const WORKFLOW_TEMPLATE_VARIABLES = Object.freeze({
   imageList: "{{ $('输入参数汇总').item.json['图片信息'] }}",
   productImageList: "{{ $('文案提示词').item.json.image_url_list }}",
   firstImage: "{{ $('输入参数汇总').item.json['图片信息'][0] }}",
+  secondImage: "{{ $('输入参数汇总').item.json['图片信息'][1] }}",
   logoHint: "{{ $('输入参数汇总').item.json['用户输入2'] }}",
   forbiddenLogo: "{{ $('输入参数汇总').item.json['用户输入3'] }}",
 });
@@ -329,6 +336,8 @@ function buildAiSystemPromptV2(target) {
     lines.push("最终模板必须能让其他 AI 最大程度复刻参考图，不允许偷懒简写成一句概括。");
     lines.push("必须明确强调真实拍摄质感、真实镜头语言、真实材质纹理、真实使用痕迹和真实环境细节，避免AI感、CG感、塑料感、过度光滑和过度完美。");
     lines.push("模板必须直接使用产品图变量，并明确保留产品外形、比例、品牌与文字信息。");
+    lines.push("除用户上传产品图本身已有的品牌与文字信息外，参考图中的具体品牌名、店名、城市名、门店名、产品名都要抽象成宽泛表达，例如手持饮品、饮品店内、咖啡馆场景、门店空间，不要原样照搬。");
+    lines.push("如果参考图里没有清晰可复用的文字或版式，不要强行生成文字层，也不要虚构文案。");
     lines.push("每张图都要显式写出 # 图片比例：3:4竖图。");
   } else {
     lines.push('同时输出 {"rewrite_prompt":"...","image_prompt":"..."}。');
@@ -371,6 +380,7 @@ function buildAiUserContentV2(result, imageUrls, options = {}) {
 
   if (includeImageContext) {
     lines.splice(4, 0, `参考图数量：${imageUrls.length}`);
+    lines.splice(5, 0, `参考图限制：仅分析前 ${MAX_AI_IMAGE_ANALYSIS_COUNT} 张，其余略过`);
   }
 
   if (rewriteDirection) {
@@ -422,10 +432,13 @@ function buildAiUserContentV2(result, imageUrls, options = {}) {
     lines.push("- 必须把“物体细节”写进模板，例如边缘轮廓、表面纹理、反光方式、透明度、褶皱、接缝、刻字、瓶口、杯盖、吸管、水珠、指纹、磨砂或高光质感。");
     lines.push("- 负面提示要明确排除：AI感过强、CG渲染感、塑料假面、错误结构、细节糊掉、边缘发虚、材质失真、过度锐化、过度磨皮、画面假干净。");
     lines.push("- 如果参考图信息很少，也要尽量把能观察到的细节写具体，不要退化成简单通用模板。");
+    lines.push("- 参考图里出现的具体品牌名、店名、城市名、门店名、产品名，默认都要改写成宽泛可复用的类目表达；只有用户上传产品图本身已有的品牌和文字信息需要保留。");
+    lines.push("- 例如“手持XX牌奶茶/咖啡”改成“手持饮品”，“上海XX咖啡店”改成“饮品店内”或“咖啡馆场景”。");
+    lines.push("- 文字层不是固定必选项，只有当参考图里确实存在清晰可复用的文字、标题、版式或排版结构时才输出；没有就省略，不要硬写。");
     lines.push("- 必须严格套用下面给定的模板骨架输出 image_prompt，不允许自创标题层级或改成别的格式。");
-    lines.push("- 其中“风格1、2、3、4”的名称、背景层、产品层、文字层、品牌信息层内容要根据分析图动态生成；骨架标题保持不变。");
+    lines.push("- 其中“风格1、2、3、4”的名称、背景层、产品层、品牌信息层内容要根据分析图动态生成；如果参考图有明确文字版式，再补充文字层，否则省略该层。");
     lines.push("- 每个风格都必须独立，不混合、不简化，且统一视觉调性。");
-    lines.push("", "image_prompt 模板骨架：", buildDynamicImagePromptTemplateSpec());
+    lines.push("", "image_prompt 模板骨架：", buildDynamicImagePromptTemplateSpec(result));
   } else {
     lines.push("- rewrite_prompt 直接写成给其他 AI 使用的仿写提示词，不要写成新笔记。");
     lines.push("- image_prompt 直接写成给其他 AI 使用的成图提示词，不要写成图片说明。");
@@ -453,18 +466,19 @@ function buildAiUserContentV2(result, imageUrls, options = {}) {
   ];
 }
 
-function buildDynamicImagePromptTemplateSpec() {
+function buildDynamicImagePromptTemplateSpec(result) {
   const vars = WORKFLOW_TEMPLATE_VARIABLES;
+  const outputTypeLabel = inferDynamicImageOutputTypeLabel(result);
   return [
     "【核心主题】",
-    `以标题“${vars.title}”为核心，结合正文“${vars.content}”和产品图“${vars.logoHint}”，LOGO“${vars.forbiddenLogo}”作为依据生成专业的电商保健品海报/图。`,
+    `以标题“${vars.title}”为核心，结合正文“${vars.content}”和产品图「${vars.firstImage}」，LOGO/场景「${vars.secondImage}」作为依据生成${outputTypeLabel}。`,
     "",
     "【生成参数】",
-    "- 生成图片数量：4 张，4 种风格各生成 1 张",
-    "- 图片比例：9:16 竖图",
-    "- 输出要求：每张图独立风格，不混合、不简化，统一视觉调性",
+    "- 生成图片数量：3张，3种风格各生成1张",
+    "- 图片比例：3:4 竖图",
+    "- 输出要求：每张图独立风格，不混合、不简化，统一清新治愈高级简约视觉调性",
     "",
-    "【4种风格精准规范（可复用）】",
+    "【3种风格精准规范（可复用）】",
     "---",
     "### 风格1：根据分析图1动态命名的风格",
     "#### 背景层",
@@ -473,8 +487,8 @@ function buildDynamicImagePromptTemplateSpec() {
     "#### 产品层",
     "核心主体：根据分析图1动态填写产品摆放、占比、阴影、真实质感、细节纹理",
     "点缀元素：根据分析图1动态填写同色系辅助元素",
-    "#### 文字层",
-    `主标题：${vars.title}，根据分析图1动态填写字体气质、字号、位置`,
+    "#### 文字层（如有）",
+    "仅当分析图1中存在清晰可复用的文字、标题或版式时输出；没有则省略本节",
     "#### 品牌信息层",
     `顶部：LOGO「${vars.forbiddenLogo}」，固定不变形，不变色，不新增或删减元素`,
     "底部：根据分析图1动态填写产品核心卖点/昵称小字，黑体，字号20px，居中",
@@ -487,8 +501,8 @@ function buildDynamicImagePromptTemplateSpec() {
     "#### 产品层",
     "核心主体：根据分析图2动态填写产品摆放、占比、阴影、真实质感、细节纹理",
     "点缀元素：根据分析图2动态填写同色系辅助元素",
-    "#### 文字层",
-    `主标题：${vars.title}，根据分析图2动态填写字体气质、字号、位置`,
+    "#### 文字层（如有）",
+    "仅当分析图2中存在清晰可复用的文字、标题或版式时输出；没有则省略本节",
     "#### 品牌信息层",
     `顶部：LOGO「${vars.forbiddenLogo}」，固定不变形，不变色，不新增或删减元素`,
     "底部：根据分析图2动态填写产品核心卖点/昵称小字，黑体，字号20px，居中",
@@ -501,25 +515,11 @@ function buildDynamicImagePromptTemplateSpec() {
     "#### 产品层",
     "核心主体：根据分析图3动态填写产品摆放、占比、阴影、真实质感、细节纹理",
     "点缀元素：根据分析图3动态填写同色系辅助元素",
-    "#### 文字层",
-    `主标题：${vars.title}，根据分析图3动态填写字体气质、字号、位置`,
+    "#### 文字层（如有）",
+    "仅当分析图3中存在清晰可复用的文字、标题或版式时输出；没有则省略本节",
     "#### 品牌信息层",
     `顶部：LOGO「${vars.forbiddenLogo}」，固定不变形，不变色，不新增或删减元素`,
     "底部：根据分析图3动态填写产品核心卖点/昵称小字，黑体，字号20px，居中",
-    "",
-    "---",
-    "### 风格4：根据分析图4动态命名的风格",
-    "#### 背景层",
-    "1. 底色：根据分析图4动态填写主色调/渐变/底纹",
-    "2. 辅助元素：根据分析图4动态填写场景符号、道具、装饰元素",
-    "#### 产品层",
-    "核心主体：根据分析图4动态填写产品摆放、占比、阴影、真实质感、细节纹理",
-    "点缀元素：根据分析图4动态填写同色系辅助元素",
-    "#### 文字层",
-    `主标题：${vars.title}，根据分析图4动态填写字体气质、字号、位置`,
-    "#### 品牌信息层",
-    `顶部：LOGO「${vars.forbiddenLogo}」，固定不变形，不变色，不新增或删减元素`,
-    "底部：根据分析图4动态填写产品核心卖点/昵称小字，黑体，字号20px，居中",
     "",
     "【终极禁用规则（绝对执行）】",
     "1. 只允许出现：主标题 + 副标题 + 品牌名 + 底部产品卖点/昵称小字，禁止任何其他文字",
@@ -531,6 +531,29 @@ function buildDynamicImagePromptTemplateSpec() {
     `7. 禁止产品图「${vars.logoHint}」变形、变色、新增或删减元素/文字`,
     "8. 禁止文字乱码、变形、不清晰；禁止文字乱码、变形、不清晰；禁止文字乱码、变形、不清晰；",
   ].join("\n");
+}
+
+function inferDynamicImageOutputTypeLabel(result) {
+  const title = String(result?.title || "").trim();
+  const body = String(result?.body || "").trim();
+  const tags = Array.isArray(result?.tags)
+    ? result.tags.map((tag) => String(tag || "").trim()).filter(Boolean)
+    : [];
+  const combined = [title, body, tags.join(" ")].filter(Boolean).join(" ");
+
+  if (/(咖啡|拿铁|美式|奶茶|果茶|茶饮|饮品|柠檬茶|奶盖|探店|门店|吧台)/.test(combined)) {
+    return "茶饮探店实拍图";
+  }
+
+  if (/(护肤|精华|面霜|水乳|彩妆|口红|粉底|香水)/.test(combined)) {
+    return "护肤彩妆产品实拍图";
+  }
+
+  if (/(包包|鞋子|穿搭|单品|服装|饰品|配件)/.test(combined)) {
+    return "单品种草实拍图";
+  }
+
+  return "产品场景实拍图";
 }
 
 async function generatePromptsWithAi(result, options = {}) {
@@ -558,78 +581,19 @@ async function generatePromptsWithAi(result, options = {}) {
     payload.model = AI_API_MODEL;
   }
 
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), AI_REQUEST_TIMEOUT_MS);
-  const responseFormats = buildAiResponseFormatCandidates(target);
-
   try {
-    let lastError = null;
-
-    for (const responseFormat of responseFormats) {
-      const requestPayload = { ...payload };
-      if (responseFormat) {
-        requestPayload.response_format = responseFormat;
-      }
-
-      const response = await fetch(endpointUrl, {
-        method: "POST",
-        headers: buildAiRequestHeaders(),
-        body: JSON.stringify(requestPayload),
-        signal: controller.signal,
-      });
-
-      const rawText = await response.text();
-      if (!response.ok) {
-        const error = new Error(
-          `AI request failed: ${response.status} ${truncateErrorText(rawText)}`
-        );
-
-        if (shouldRetryWithoutStructuredOutput(response.status, rawText)) {
-          lastError = error;
-          continue;
-        }
-
-        throw error;
-      }
-
-      const parsed = parseAiResponsePayload(rawText);
-      const content = extractAiMessageContent(parsed);
-      const promptJson = parseAiJsonContent(content);
-
-      return {
-        rewritePrompt:
-          target === "image" ? "" : formatRewritePromptOutput(promptJson.rewrite_prompt),
-        imagePrompt:
-          target === "rewrite" ? "" : formatImagePromptOutput(promptJson.image_prompt),
-        debugMessages: payload.messages,
-      };
-    }
-
-    throw lastError || new Error("AI prompt generation failed.");
-    /*
-
-    if (!response.ok) {
-      throw new Error(`AI 接口返回异常：${response.status} ${truncateErrorText(rawText)}`);
-    }
-
-    const parsed = parseAiResponsePayload(rawText);
-    const content = extractAiMessageContent(parsed);
-    const promptJson = parseAiJsonContent(content);
-
-    return {
-      rewritePrompt:
-        target === "image" ? "" : formatRewritePromptOutput(promptJson.rewrite_prompt),
-      imagePrompt:
-        target === "rewrite" ? "" : formatImagePromptOutput(promptJson.image_prompt),
-    };
-    */
+    return await requestPromptsFromProvider({
+      endpointUrl,
+      headers: buildAiRequestHeaders(),
+      payload,
+      provider: "default",
+      target,
+    });
   } catch (error) {
     if (error && typeof error === "object") {
       error.debugMessages = payload.messages;
     }
     throw error;
-  } finally {
-    clearTimeout(timeoutId);
   }
 }
 
@@ -652,22 +616,100 @@ async function generatePromptsWithGrobotai(result, options = {}) {
     temperature: 0.2,
   };
 
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), AI_REQUEST_TIMEOUT_MS);
-  const responseFormats = buildAiResponseFormatCandidates(target);
-
   try {
-    let lastError = null;
+    return await requestPromptsFromProvider({
+      endpointUrl,
+      headers: buildGrobotaiRequestHeaders(),
+      payload,
+      provider: "grobotai",
+      target,
+    });
+  } catch (error) {
+    if (error && typeof error === "object") {
+      error.debugMessages = payload.messages;
+    }
+    throw error;
+  }
+}
 
-    for (const responseFormat of responseFormats) {
-      const requestPayload = { ...payload };
-      if (responseFormat) {
-        requestPayload.response_format = responseFormat;
+async function requestPromptsFromProvider({ endpointUrl, headers, payload, provider, target }) {
+  const responseFormats = buildAiResponseFormatCandidates(target, provider);
+  let lastError = null;
+  let hasRetriedWithoutImageAttachments = false;
+
+  for (const responseFormat of responseFormats) {
+    let requestPayload = { ...payload };
+    if (responseFormat) {
+      requestPayload.response_format = responseFormat;
+    }
+
+    try {
+      const rawText = await postJsonWithRetry(endpointUrl, headers, requestPayload);
+      const parsed = parseAiResponsePayload(rawText);
+      const content = extractAiMessageContent(parsed);
+      const promptJson = parseAiJsonContent(content, target);
+
+      return {
+        rewritePrompt:
+          target === "image" ? "" : formatRewritePromptOutput(promptJson.rewrite_prompt),
+        imagePrompt:
+          target === "rewrite" ? "" : formatImagePromptOutput(promptJson.image_prompt),
+        debugMessages: payload.messages,
+      };
+    } catch (error) {
+      lastError = error;
+
+      if (
+        !hasRetriedWithoutImageAttachments &&
+        shouldRetryWithoutRemoteImages(error) &&
+        payloadContainsRemoteImages(requestPayload)
+      ) {
+        hasRetriedWithoutImageAttachments = true;
+        requestPayload = stripRemoteImagesFromPayload(requestPayload);
+
+        try {
+          const rawText = await postJsonWithRetry(endpointUrl, headers, requestPayload);
+          const parsed = parseAiResponsePayload(rawText);
+          const content = extractAiMessageContent(parsed);
+          const promptJson = parseAiJsonContent(content, target);
+
+          return {
+            rewritePrompt:
+              target === "image" ? "" : formatRewritePromptOutput(promptJson.rewrite_prompt),
+            imagePrompt:
+              target === "rewrite" ? "" : formatImagePromptOutput(promptJson.image_prompt),
+            debugMessages: requestPayload.messages,
+          };
+        } catch (retryError) {
+          lastError = retryError;
+        }
       }
 
+      if (
+        responseFormat &&
+        isStructuredOutputCompatibilityError(lastError)
+      ) {
+        continue;
+      }
+
+      throw lastError;
+    }
+  }
+
+  throw lastError || new Error("AI prompt generation failed.");
+}
+
+async function postJsonWithRetry(endpointUrl, headers, requestPayload) {
+  let lastError = null;
+
+  for (let attempt = 0; attempt <= AI_REQUEST_RETRY_COUNT; attempt += 1) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), AI_REQUEST_TIMEOUT_MS);
+
+    try {
       const response = await fetch(endpointUrl, {
         method: "POST",
-        headers: buildGrobotaiRequestHeaders(),
+        headers,
         body: JSON.stringify(requestPayload),
         signal: controller.signal,
       });
@@ -677,37 +719,93 @@ async function generatePromptsWithGrobotai(result, options = {}) {
         const error = new Error(
           `AI request failed: ${response.status} ${truncateErrorText(rawText)}`
         );
-
-        if (shouldRetryWithoutStructuredOutput(response.status, rawText)) {
-          lastError = error;
-          continue;
-        }
-
+        error.status = response.status;
+        error.rawText = rawText;
         throw error;
       }
 
-      const parsed = parseAiResponsePayload(rawText);
-      const content = extractAiMessageContent(parsed);
-      const promptJson = parseAiJsonContent(content);
+      return rawText;
+    } catch (error) {
+      lastError = error;
 
-      return {
-        rewritePrompt:
-          target === "image" ? "" : formatRewritePromptOutput(promptJson.rewrite_prompt),
-        imagePrompt:
-          target === "rewrite" ? "" : formatImagePromptOutput(promptJson.image_prompt),
-        debugMessages: payload.messages,
-      };
-    }
+      if (!shouldRetryAiRequest(error) || attempt >= AI_REQUEST_RETRY_COUNT) {
+        throw error;
+      }
 
-    throw lastError || new Error("AI prompt generation failed.");
-  } catch (error) {
-    if (error && typeof error === "object") {
-      error.debugMessages = payload.messages;
+      await sleep(AI_REQUEST_RETRY_DELAY_MS * (attempt + 1));
+    } finally {
+      clearTimeout(timeoutId);
     }
-    throw error;
-  } finally {
-    clearTimeout(timeoutId);
   }
+
+  throw lastError || new Error("AI prompt generation failed.");
+}
+
+function shouldRetryAiRequest(error) {
+  const status = Number(error?.status);
+  const rawText = String(error?.rawText || "");
+  const message = String(error?.message || "");
+
+  if (shouldRetryWithoutStructuredOutput(status, rawText)) {
+    return false;
+  }
+
+  if (status === 408 || status === 429 || status === 500 || status === 502 || status === 503 || status === 504) {
+    return true;
+  }
+
+  return /aborted|timeout|timed out|fetch failed|socket|network/i.test(message);
+}
+
+function isStructuredOutputCompatibilityError(error) {
+  return shouldRetryWithoutStructuredOutput(Number(error?.status), String(error?.rawText || ""));
+}
+
+function shouldRetryWithoutRemoteImages(error) {
+  const rawText = String(error?.rawText || "");
+  const message = String(error?.message || "");
+  return /error while downloading|downloading: https?:\/\/|invalid image url|failed to download|image download/i.test(
+    `${message} ${rawText}`
+  );
+}
+
+function payloadContainsRemoteImages(payload) {
+  const messages = Array.isArray(payload?.messages) ? payload.messages : [];
+  return messages.some((message) => {
+    if (!Array.isArray(message?.content)) {
+      return false;
+    }
+
+    return message.content.some((item) => item?.type === "image_url");
+  });
+}
+
+function stripRemoteImagesFromPayload(payload) {
+  return {
+    ...payload,
+    messages: Array.isArray(payload?.messages)
+      ? payload.messages.map((message) => {
+          if (!Array.isArray(message?.content)) {
+            return message;
+          }
+
+          const textParts = message.content.filter((item) => item?.type === "text");
+          return {
+            ...message,
+            content:
+              textParts.length === 1
+                ? textParts[0].text
+                : textParts.length
+                  ? textParts
+                  : "",
+          };
+        })
+      : [],
+  };
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function buildAiEndpointUrl() {
@@ -769,7 +867,7 @@ function collectAiImageUrls(result) {
     }
   });
 
-  return [...uniqueMap.values()].slice(0, 12);
+  return [...uniqueMap.values()].slice(0, MAX_AI_IMAGE_ANALYSIS_COUNT);
 }
 
 function toAiSourceMediaUrl(mediaUrl) {
@@ -812,8 +910,12 @@ function normalizeMediaUrlForAi(sourceUrl) {
   return `${cleanUrl.origin}${cleanUrl.pathname}${query ? `?${query}` : ""}`;
 }
 
-function buildAiResponseFormatCandidates(target) {
-  return [buildAiJsonSchemaResponseFormat(target), { type: "json_object" }, null];
+function buildAiResponseFormatCandidates(target, provider = "default") {
+  if (provider === "grobotai") {
+    return [null];
+  }
+
+  return [{ type: "json_object" }, null];
 }
 
 function buildAiJsonSchemaResponseFormat(target) {
@@ -1342,6 +1444,24 @@ function tryParseJson(value) {
   try {
     return JSON.parse(value);
   } catch (error) {
+    const fenced = value.match(/```(?:json)?\s*([\s\S]*?)```/i);
+    if (fenced) {
+      try {
+        return JSON.parse(fenced[1].trim());
+      } catch (innerError) {
+        return null;
+      }
+    }
+
+    const matched = value.match(/\{[\s\S]*\}/);
+    if (matched) {
+      try {
+        return JSON.parse(matched[0]);
+      } catch (innerError) {
+        return null;
+      }
+    }
+
     return null;
   }
 }
@@ -1423,7 +1543,7 @@ function extractAiMessageContent(payload) {
   throw new Error("AI 返回内容为空。");
 }
 
-function parseAiJsonContent(content) {
+function parseAiJsonContent(content, target = "all") {
   const normalizePromptJson = (value) => {
     if (!value || typeof value !== "object") {
       return value;
@@ -1444,16 +1564,142 @@ function parseAiJsonContent(content) {
     return normalizePromptJson(content);
   }
 
-  try {
-    return normalizePromptJson(JSON.parse(content));
-  } catch (error) {
-    const matched = content.match(/\{[\s\S]*\}/);
-    if (matched) {
-      return normalizePromptJson(JSON.parse(matched[0]));
+  const parsed = tryParsePromptJson(content);
+  if (parsed) {
+    return normalizePromptJson(parsed);
+  }
+
+  const fallback = buildPromptJsonFallback(content, target);
+  if (fallback) {
+    return normalizePromptJson(fallback);
+  }
+
+  throw new Error("AI 返回内容不是合法 JSON。");
+}
+
+function buildPromptJsonFallback(content, target) {
+  if (typeof content !== "string") {
+    return null;
+  }
+
+  const normalized = normalizePromptFallbackText(content);
+  if (!normalized) {
+    return null;
+  }
+
+  if (target === "rewrite") {
+    return { rewrite_prompt: normalized };
+  }
+
+  if (target === "image") {
+    return { image_prompt: normalized };
+  }
+
+  return null;
+}
+
+function normalizePromptFallbackText(content) {
+  const trimmed = String(content || "").replace(/\r/g, "").trim();
+  if (!trimmed) {
+    return "";
+  }
+
+  const fenced = trimmed.match(/```(?:json|markdown|md|text)?\s*([\s\S]*?)```/i);
+  const candidate = fenced?.[1] ? fenced[1].trim() : trimmed;
+
+  return candidate
+    .replace(/^\s*(当然|下面是|以下是|好的[，,]?|可以[，,]?|已为你生成[：:]?)\s*/i, "")
+    .trim();
+}
+
+function tryParsePromptJson(content) {
+  if (typeof content !== "string" || !content.trim()) {
+    return null;
+  }
+
+  const candidates = [content.trim()];
+  const fenced = content.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenced?.[1]) {
+    candidates.push(fenced[1].trim());
+  }
+
+  const matched = content.match(/\{[\s\S]*\}/);
+  if (matched?.[0]) {
+    candidates.push(matched[0].trim());
+  }
+
+  for (const candidate of candidates) {
+    const direct = tryParseJson(candidate);
+    if (direct) {
+      return direct;
     }
 
-    throw new Error("AI 返回内容不是合法 JSON。");
+    const repaired = repairCommonJsonIssues(candidate);
+    if (repaired !== candidate) {
+      const reparsed = tryParseJson(repaired);
+      if (reparsed) {
+        return reparsed;
+      }
+    }
   }
+
+  return null;
+}
+
+function repairCommonJsonIssues(input) {
+  const source = String(input || "");
+  let result = "";
+  let inString = false;
+  let escaped = false;
+
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index];
+
+    if (escaped) {
+      result += char;
+      escaped = false;
+      continue;
+    }
+
+    if (char === "\\") {
+      result += char;
+      escaped = true;
+      continue;
+    }
+
+    if (char === '"') {
+      result += char;
+      inString = !inString;
+      continue;
+    }
+
+    if (inString) {
+      if (char === "\n") {
+        result += "\\n";
+        continue;
+      }
+
+      if (char === "\r") {
+        result += "\\r";
+        continue;
+      }
+
+      if (char === "\t") {
+        result += "\\t";
+        continue;
+      }
+
+      const code = char.charCodeAt(0);
+      if (code >= 0 && code <= 0x1f) {
+        result += `\\u${code.toString(16).padStart(4, "0")}`;
+        continue;
+      }
+    }
+
+    result += char;
+  }
+
+  return result;
 }
 
 function formatRewritePromptOutput(value) {
@@ -2117,7 +2363,21 @@ function findImagesInJson(value, depth = 0) {
 
   if (typeof value === "object") {
     const images = [];
-    const preferredKeys = ["image", "images", "thumbnailUrl", "contentUrl", "url", "src"];
+    const preferredKeys = [
+      "originImageUrl",
+      "masterUrl",
+      "urlOrigin",
+      "urlDefault",
+      "imageUrl",
+      "coverUrl",
+      "image",
+      "images",
+      "contentUrl",
+      "url",
+      "src",
+      "urlPre",
+      "thumbnailUrl",
+    ];
 
     for (const key of preferredKeys) {
       if (key in value) {
@@ -2330,7 +2590,9 @@ function normalizeXiaohongshuImageUrl(value) {
     return "";
   }
 
-  return decodeEscapedSlashes(value).replace(/^http:/, "https:").replace(/^\/\//, "https://");
+  return decodeEscapedSlashes(value)
+    .replace(/^http:/, "https:")
+    .replace(/^\/\//, "https://");
 }
 
 function isThumbnailLikeImageUrl(value) {
@@ -2559,7 +2821,7 @@ function isXiaohongshuUrl(value) {
 
 function buildClientResult(result) {
   const images = Array.isArray(result.images) ? result.images : [];
-  const uniqueImages = dedupeImageUrls(images);
+  const uniqueImages = sortImageUrlsByQuality(dedupeImageUrls(images));
   const proxiedImages = uniqueImages.map((imageUrl) => buildImageProxyUrl(imageUrl)).filter(Boolean);
   const primarySourceImage = uniqueImages[0] || result.image;
   const primaryImage = buildImageProxyUrl(primarySourceImage) || FALLBACK_IMAGE;
@@ -2586,6 +2848,14 @@ function dedupeImageUrls(images) {
   }
 
   return [...uniqueMap.values()];
+}
+
+function sortImageUrlsByQuality(images) {
+  return [...images].sort((left, right) => {
+    const leftScore = scoreImageCandidate(left, 0) + scoreImageResolution(left);
+    const rightScore = scoreImageCandidate(right, 0) + scoreImageResolution(right);
+    return rightScore - leftScore;
+  });
 }
 
 function buildImageProxyUrl(imageUrl) {

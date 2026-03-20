@@ -32,6 +32,7 @@ const copyImagePromptButton = document.querySelector("#copy-image-prompt-button"
 const FALLBACK_IMAGE =
   "https://images.unsplash.com/photo-1517841905240-472988babdf9?auto=format&fit=crop&w=1200&q=80";
 const MAX_REFERENCE_MEDIA = 14;
+const MAX_IMAGE_PROMPT_ANALYSIS_COUNT = 8;
 const DEFAULT_SUBMIT_BUTTON_TEXT = "开始解析";
 const HISTORY_STORAGE_KEY = "note-parser:url-history";
 const HISTORY_LIMIT = 12;
@@ -43,6 +44,7 @@ const WORKFLOW_TEMPLATE_VARIABLES = Object.freeze({
   imageList: "{{ $('输入参数汇总').item.json['图片信息'] }}",
   productImageList: "{{ $('文案提示词').item.json.image_url_list }}",
   firstImage: "{{ $('输入参数汇总').item.json['图片信息'][0] }}",
+  secondImage: "{{ $('输入参数汇总').item.json['图片信息'][1] }}",
   logoHint: "{{ $('输入参数汇总').item.json['用户输入2'] }}",
   forbiddenLogo: "{{ $('输入参数汇总').item.json['用户输入3'] }}",
 });
@@ -533,6 +535,22 @@ function getPromptNotGeneratedText() {
   return "未通过大模型生成提示词";
 }
 
+function getPromptGenerationErrorText(error) {
+  const message = typeof error?.message === "string" ? error.message.trim() : "";
+
+  if (!message) {
+    return getPromptNotGeneratedText();
+  }
+
+  if (
+    /请先登录|401|token.*失效|token.*过期|unauthorized|authorization/i.test(message)
+  ) {
+    return "大模型调用失败：Token 已失效或未登录，请更换新的 API Token。";
+  }
+
+  return `大模型调用失败：${message}`;
+}
+
 async function hydratePromptOutputs(result, options = {}) {
   const rewriteRequestId = ++rewritePromptRequestSerial;
   const imageRequestId = ++imagePromptRequestSerial;
@@ -561,7 +579,7 @@ async function hydratePromptOutputs(result, options = {}) {
     }
   } catch (error) {
     if (rewriteRequestId === rewritePromptRequestSerial) {
-      resultPrompt.value = getPromptNotGeneratedText();
+      resultPrompt.value = getPromptGenerationErrorText(error);
       setPromptMessagesOutput(rewriteMessagesOutput, error?.debugMessages);
     }
   }
@@ -593,7 +611,7 @@ async function hydrateAiImagePrompt(result, requestId, direction = "") {
     if (requestId !== imagePromptRequestSerial) {
       return;
     }
-    resultImagePrompt.value = getPromptNotGeneratedText();
+    resultImagePrompt.value = getPromptGenerationErrorText(error);
     setPromptMessagesOutput(imageMessagesOutput, error?.debugMessages);
   }
 }
@@ -642,7 +660,7 @@ async function regenerateRewritePrompt() {
       return;
     }
 
-    resultPrompt.value = getPromptNotGeneratedText();
+    resultPrompt.value = getPromptGenerationErrorText(error);
   } finally {
     if (requestId === rewritePromptRequestSerial) {
       setRegenerateButtonState(regeneratePromptButton, true, "重新生成");
@@ -677,7 +695,7 @@ async function regenerateImagePrompt() {
       return;
     }
 
-    resultImagePrompt.value = getPromptNotGeneratedText();
+    resultImagePrompt.value = getPromptGenerationErrorText(error);
     setPromptMessagesOutput(imageMessagesOutput, error?.debugMessages);
   } finally {
     if (requestId === imagePromptRequestSerial) {
@@ -1109,7 +1127,7 @@ async function buildImageGenerationPrompt(result, direction = "") {
 }
 
 function collectPromptAnalysisImageUrls(result) {
-  return collectRenderableImageUrls(result);
+  return collectRenderableImageUrls(result).slice(0, MAX_IMAGE_PROMPT_ANALYSIS_COUNT);
 }
 
 function buildImagePromptFallback(result, direction = "") {
