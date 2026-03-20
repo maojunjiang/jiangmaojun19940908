@@ -336,10 +336,6 @@ function buildAiSystemPromptV2(target) {
 
 function buildAiUserContentV2(result, imageUrls, options = {}) {
   const target = normalizePromptTarget(options.target);
-  if (target === "rewrite") {
-    return "分析这篇文章的内容写一个可复用的提示词prompt";
-  }
-
   if (target === "image") {
     if (!imageUrls.length) {
       return "详细描述这些图";
@@ -420,6 +416,7 @@ function buildAiUserContentV2(result, imageUrls, options = {}) {
         `- 复刻概括：${String(item?.prompt || "").trim() || "-"}`,
         `- 负面约束：${String(item?.negative || "").trim() || "-"}`,
         `- 参数建议：${String(item?.params || "").trim() || "-"}`,
+        `- 画面比例：${inferDynamicImageRatioLabel(item?.aspectRatio)}`,
         `- 主体横向占比：${Number.isFinite(item?.spreadX) ? item.spreadX.toFixed(2) : "-"}`,
         `- 主体纵向占比：${Number.isFinite(item?.spreadY) ? item.spreadY.toFixed(2) : "-"}`
       );
@@ -435,6 +432,7 @@ function buildAiUserContentV2(result, imageUrls, options = {}) {
   } else if (target === "image") {
     lines.push("- 只输出 image_prompt，不要输出 rewrite_prompt。");
     lines.push("- image_prompt 直接写成给其他 AI 使用的成图提示词，不要写成图片说明。");
+    lines.push("- image_prompt 的【变量占位（固定保留）】【核心主题】【生成参数】【终极禁用规则（绝对执行）】由系统固定生成，你只需要补全中间的动态风格内容。");
     lines.push("- 每张图都要先用 6-10 条 bullet 细拆参考图，再给出一段高还原度、可直接复制的完整成图提示词。");
     lines.push("- 完整成图提示词必须覆盖：主体摆放、场景空间、镜头景别、机位角度、背景层次、道具元素、光线来源、颜色关系、材质表面、氛围关键词、文字处理、负面限制、参数建议。");
     lines.push("- 每张图的描述必须严格围绕对应抓取图里真实可见的内容来写，详细列出画面里的场景物件、前后景关系、装饰元素和空间信息。");
@@ -443,11 +441,13 @@ function buildAiUserContentV2(result, imageUrls, options = {}) {
     lines.push("- 必须把“物体细节”写进模板，例如边缘轮廓、表面纹理、反光方式、透明度、褶皱、接缝、刻字、瓶口、杯盖、吸管、水珠、指纹、磨砂或高光质感。");
     lines.push("- 负面提示要明确排除：AI感过强、CG渲染感、塑料假面、错误结构、细节糊掉、边缘发虚、材质失真、过度锐化、过度磨皮、画面假干净。");
     lines.push("- 如果参考图信息很少，也要尽量把能观察到的细节写具体，不要退化成简单通用模板。");
-    lines.push("- 必须严格套用下面给定的模板骨架输出 image_prompt，不允许自创标题层级或改成别的格式。");
+    lines.push("- 你只输出中间动态部分，不要重复输出固定头部和固定尾部。");
+    lines.push("- 动态部分必须从“【N种风格精准规范（可复用）】”开始，到最后一个风格块结束。不要输出“【变量占位（固定保留）】【核心主题】【生成参数】【终极禁用规则（绝对执行）】”。");
+    lines.push("- 必须严格套用下面给定的动态模板骨架输出，不允许自创标题层级或改成别的格式。");
     lines.push("- 其中可被分析图替换的内容，只能是模板里的视觉/风格描述字段；固定变量、核心主体约束、禁用规则、生成参数和骨架标题保持不变。");
     lines.push("- 视觉字段的替换必须围绕对应抓取图的真实画面内容展开，写得足够具体，但不要写具体品牌名、具体 logo 或商标信息。");
     lines.push("- 每个风格都必须独立，不混合、不简化，且统一视觉调性。");
-    lines.push("", "image_prompt 模板骨架：", buildDynamicImagePromptTemplateSpec(imageUrls.length));
+    lines.push("", "image_prompt 动态部分模板骨架：", buildDynamicImagePromptDynamicSectionSpecV2(imageUrls.length, result));
   } else {
     lines.push("- rewrite_prompt 直接写成给其他 AI 使用的仿写提示词，不要写成新笔记。");
     lines.push("- image_prompt 直接写成给其他 AI 使用的成图提示词，不要写成图片说明。");
@@ -476,52 +476,344 @@ function buildAiUserContentV2(result, imageUrls, options = {}) {
 }
 
 
-function buildDynamicImagePromptTemplateSpec(styleCount = IMAGE_PROMPT_REFERENCE_LIMIT) {
+function buildDynamicImagePromptTemplateSpec(styleCount = IMAGE_PROMPT_REFERENCE_LIMIT, result = null) {
+  return [
+    buildDynamicImagePromptFixedPrefix(styleCount, result),
+    buildDynamicImagePromptDynamicSectionSpecV2(styleCount, result),
+    buildDynamicImagePromptFixedSuffix(result),
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function buildDynamicImagePromptFixedPrefix(styleCount = IMAGE_PROMPT_REFERENCE_LIMIT, result = null, direction = "") {
   const vars = WORKFLOW_TEMPLATE_VARIABLES;
   const safeCount = Math.max(1, Math.min(Number(styleCount) || 1, IMAGE_PROMPT_REFERENCE_LIMIT));
+  const analyses = Array.isArray(result?.imageAnalyses)
+    ? result.imageAnalyses.slice(0, safeCount)
+    : [];
+  const theme = inferSceneTransferTemplateThemeFromResult(result);
+  const ratioText = buildDynamicImageRatioSummary(analyses, safeCount);
+  const lines = [
+    "【变量占位（固定保留）】",
+    `- 正文内容：${vars.content}`,
+    `- 主体产品图/场景图列表：${vars.imageList}`,
+    `- 标题：${vars.title}`,
+    `- 主体产品图首图：${vars.firstImage}`,
+    "",
+    "【核心主题】",
+    `以标题“${vars.title}”为核心，结合正文“${vars.content}”和产品图“${vars.firstImage}”，产品图“${vars.imageList}”作为依据生成${theme.outputLabel}。`,
+    "",
+    "【生成参数】",
+    `- 生成图片数量：${safeCount} 张，${safeCount}种风格各生成1张`,
+    `- 图片比例：${ratioText}`,
+    "- 输出要求：每张图独立风格，不混合、不简化，统一视觉调性；**图片中不得出现任何文字、LOGO、标签、贴纸类元素**；**强化真实生活感，弱化AI合成感**",
+    `- 产品保持基准：主体产品以“${vars.firstImage}”为唯一依据，不变形、不变色、不增删元素/文字`,
+    `- 场景参考输入：主体产品图/场景图列表统一引用“${vars.imageList}”`,
+  ];
+
+  if (direction) {
+    lines.push(`- 额外方向（权重 0.5）：${direction}`);
+    lines.push("- 方向吸收规则：只中度影响风格强调和氛围包装，不覆盖产品保持规则与对应分析图风格骨架。");
+  }
+
+  return lines.join("\n");
+}
+
+function buildDynamicImagePromptDynamicSectionSpec(styleCount = IMAGE_PROMPT_REFERENCE_LIMIT, result = null) {
+  const safeCount = Math.max(1, Math.min(Number(styleCount) || 1, IMAGE_PROMPT_REFERENCE_LIMIT));
+  const analyses = Array.isArray(result?.imageAnalyses)
+    ? result.imageAnalyses.slice(0, safeCount)
+    : [];
   const styleBlocks = Array.from({ length: safeCount }, (_, index) => {
     const serial = index + 1;
+    const analysis = analyses[index] || null;
+    const styleName = inferDynamicImageStyleName(analysis, serial);
+    const ratioLabel = inferDynamicImageRatioLabel(analysis?.aspectRatio);
     return [
       "---",
-      `### 风格${serial}：根据分析图${serial}动态命名的风格`,
+      `### 风格${serial}：${styleName}`,
+      `- 对应分析图：图${serial}`,
+      `- 参考比例：${ratioLabel}`,
       "#### 背景层",
-      `1. 底色：根据分析图${serial}动态填写主色调/渐变/底纹`,
-      `2. 辅助元素：根据分析图${serial}动态填写真实可见的场景符号、道具、装饰元素、前后景层次与空间关系，但不要写具体品牌和 logo`,
+      `1. 场景空间：根据分析图${serial}动态填写真实可见的空间类型、前中后景关系、桌面/吧台/窗景/街景/绿植/人物等环境层次`,
+      `2. 道具与环境元素：根据分析图${serial}动态填写真实可见的器具、陪体、手部、餐具、陈列物与生活化细节，但不要写具体品牌和logo`,
       "#### 产品层",
-      `核心主体：根据分析图${serial}动态填写产品摆放、占比、阴影、真实质感、细节纹理、与周围物件关系，但不要写具体品牌和 logo`,
-      `点缀元素：根据分析图${serial}动态填写同色系辅助元素与可复用的通用视觉元素，不要写商标信息`,
-      "#### 文字层（如该分析图存在文字再输出；无文字则整段省略）",
-      `主标题：${vars.title}，根据分析图${serial}动态填写字体气质、字号、位置`,
-      `内容文案：${vars.content}，根据分析图${serial}动态填写文字层级、段落密度、对齐方式与留白关系`,
-      "#### 品牌信息层",
-      `顶部：LOGO「${vars.forbiddenLogo}」，固定不变形，不变色，不新增或删减元素，不允许被抓取图分析结果改写`,
-      `底部：固定保留产品核心卖点/昵称小字的结构，只允许微调视觉呈现方式，不允许写入抓取图中的具体品牌信息`,
+      `1. 主体产品：固定使用变量 {{ $('输入参数汇总').item.json['图片信息'][0] }} 与 {{ $('输入参数汇总').item.json['图片信息'] }}，根据分析图${serial}动态填写主体摆放、占比、遮挡关系、表面质感与细节纹理，但不得改变原始产品结构`,
+      `2. 构图与镜头：根据分析图${serial}动态填写景别、机位、视角、主体重心和留白关系`,
+      `3. 光线与色彩：根据分析图${serial}动态填写主光方向、亮暗过渡、阴影关系、主色调和冷暖关系`,
+      `4. 材质细节：根据分析图${serial}动态填写边缘轮廓、反光方式、透明度、水珠、磨砂、接缝、指纹、磨损等真实细节`,
+      "#### 氛围强化",
+      `- 根据分析图${serial}动态填写真实手机/相机实拍感、轻微景深、自然噪点、生活方式氛围与情绪节奏`,
+      `- 画面比例保持${ratioLabel}，只吸收图${serial}的风格特征，不与其他分析图混合`,
     ].join("\n");
   }).join("\n\n");
 
   return [
-    "【核心主题】",
-    `以标题“${vars.title}”为核心，结合正文“${vars.content}”和产品图“${vars.logoHint}”，LOGO“${vars.forbiddenLogo}”作为依据生成专业的电商保健品海报/图。`,
-    "",
-    "【生成参数】",
-    `- 生成图片数量：${safeCount} 张，${safeCount} 种风格各生成 1 张`,
-    "- 图片比例：9:16 竖图",
-    "- 输出要求：每张图独立风格，不混合、不简化，统一视觉调性",
-    "- 死规则：图片分析结果只能替换模板里的视觉/风格描述字段，不能改写固定变量、核心主体规则、禁用规则、品牌信息骨架和生成参数",
-    "",
     `【${safeCount}种风格精准规范（可复用）】`,
     styleBlocks,
-    "",
-    "【终极禁用规则（绝对执行）】",
-    "1. 只允许出现：主标题 + 副标题 + 品牌名 + 底部产品卖点/昵称小字，禁止任何其他文字",
-    "2. 禁止日期、网址、二维码、乱码、符号、多余小字",
-    "3. 产品必须为核心视觉主体，占比≥40%，清晰完整，不被遮挡",
-    "4. 禁止3D渲染、夸张光影、杂乱元素，严格保留清新专业质感",
-    "5. 色彩必须严格匹配每个风格对应参考图的主色调与场景气质",
-    `6. 禁止LOGO「${vars.forbiddenLogo}」变形、变色、新增或删减元素`,
-    `7. 禁止产品图「${vars.logoHint}」变形、变色、新增或删减元素/文字`,
-    "8. 禁止文字乱码、变形、不清晰；禁止文字乱码、变形、不清晰；禁止文字乱码、变形、不清晰；",
   ].join("\n");
+}
+
+function buildDynamicImagePromptDynamicSectionSpecV2(styleCount = IMAGE_PROMPT_REFERENCE_LIMIT, result = null) {
+  const safeCount = Math.max(1, Math.min(Number(styleCount) || 1, IMAGE_PROMPT_REFERENCE_LIMIT));
+  const analyses = Array.isArray(result?.imageAnalyses)
+    ? result.imageAnalyses.slice(0, safeCount)
+    : [];
+  const styleBlocks = Array.from({ length: safeCount }, (_, index) => {
+    const serial = index + 1;
+    const analysis = analyses[index] || null;
+    const styleName = inferDynamicImageStyleName(analysis, serial);
+    const ratioLabel = inferDynamicImageRatioLabel(analysis?.aspectRatio);
+    const sceneType = inferDynamicSceneType(analysis);
+    const promptCode = buildDynamicImagePromptCodeBlock(serial, styleName, ratioLabel, analysis, sceneType);
+    return [
+      "---",
+      `### 风格${serial}：${styleName}`,
+      `- 对应分析图：图${serial}`,
+      `- 参考比例：${ratioLabel}`,
+      "#### 参考图拆解",
+      `- 场景类型：${sceneType}`,
+      `- 空间氛围：${String(analysis?.background || `根据分析图${serial}动态提炼真实空间层次`).trim() || `根据分析图${serial}动态提炼真实空间层次`}`,
+      `- 核心元素：${buildDynamicImageCoreElements(analysis, serial)}`,
+      `- 构图镜头：${buildDynamicImageCompositionLine(analysis, serial)}`,
+      `- 光线色彩：${buildDynamicImageLightColorLine(analysis, serial)}`,
+      `- 材质细节：${String(analysis?.material || "").trim() || `根据分析图${serial}补充杯身、托盘、桌面、反光、水珠、磨砂等真实细节`}`,
+      `- 氛围关键词：${String(analysis?.mood || "").trim() || `根据分析图${serial}补充真实生活方式氛围`}`,
+      "#### 最终生图 Prompt",
+      "```markdown",
+      promptCode,
+      "```",
+    ].join("\n");
+  }).join("\n\n");
+
+  return [
+    `【${safeCount}种风格精准规范（可复用）】`,
+    styleBlocks,
+  ].join("\n");
+}
+
+function buildDynamicImagePromptFixedSuffix(result = null) {
+  const vars = WORKFLOW_TEMPLATE_VARIABLES;
+  return [
+    "【终极禁用规则（绝对执行）】",
+    "1. **严格禁止图片中出现任何文字、LOGO、标签、贴纸、二维码、装饰性文字元素**，背景文字需完全模糊至不可辨认",
+    "2. 禁止日期、网址、二维码、乱彩符号、多余装饰文字",
+    "3. 产品必须为核心视觉主体，占比≥40%，清晰完整不被遮挡",
+    "4. 禁止过度干净或完美的AI质感，必须加入**环境噪点、轻微模糊、动态人物、真实生活细节**强化实拍感",
+    "5. 色彩与场景必须严格匹配对应分析图，不得混用其他分析图风格",
+    `6. 禁止产品图“${vars.firstImage}”变形、变色、增删元素/文字`,
+    "7. 禁止出现乱码、文字不清晰！禁止出现乱码、文字不清晰！禁止出现乱码、文字不清晰！",
+  ].join("\n");
+}
+
+function composeFixedImagePrompt(dynamicContent, result, direction = "") {
+  const styleCount = Math.max(
+    Array.isArray(result?.imageAnalyses) ? result.imageAnalyses.length : 0,
+    Array.isArray(result?.images) ? result.images.length : 0,
+    1
+  );
+  const prefix = buildDynamicImagePromptFixedPrefix(styleCount, result, direction);
+  const dynamicSection =
+    extractDynamicImagePromptSection(dynamicContent) ||
+    buildDynamicImagePromptDynamicSectionSpecV2(styleCount, result);
+  const suffix = buildDynamicImagePromptFixedSuffix(result);
+
+  return [prefix, dynamicSection, suffix].filter(Boolean).join("\n\n");
+}
+
+function extractDynamicImagePromptSection(content) {
+  const normalized = String(content || "").replace(/\r/g, "").trim();
+  if (!normalized) {
+    return "";
+  }
+
+  const sectionMatch = normalized.match(
+    /【\d+种风格精准规范（可复用）】[\s\S]*?(?=\n【终极禁用规则（绝对执行）】|$)/
+  );
+  if (sectionMatch) {
+    return sectionMatch[0].trim();
+  }
+
+  const startAtStyleHeader = normalized.match(/【\d+种风格精准规范（可复用）】[\s\S]*$/);
+  if (startAtStyleHeader) {
+    return startAtStyleHeader[0].trim();
+  }
+
+  if (/^###\s*风格\d+：/m.test(normalized)) {
+    const styleCount = (normalized.match(/^###\s*风格\d+：/gm) || []).length;
+    return [`【${styleCount || "N"}种风格精准规范（可复用）】`, normalized].join("\n");
+  }
+
+  return normalized;
+}
+
+function buildDynamicImageRatioSummary(analyses, safeCount) {
+  const safeAnalyses = Array.isArray(analyses) ? analyses.filter(Boolean) : [];
+  if (!safeAnalyses.length) {
+    return "按分析图原始比例输出";
+  }
+
+  const labels = Array.from({ length: safeCount }, (_, index) => ({
+    index,
+    label: inferDynamicImageRatioLabel(safeAnalyses[index]?.aspectRatio),
+  }));
+  const uniqueLabels = Array.from(new Set(labels.map((item) => item.label)));
+
+  if (uniqueLabels.length === 1) {
+    return `${uniqueLabels[0]}（与分析图一致）`;
+  }
+
+  return `按分析图原始比例输出（${labels
+    .map((item) => `图${item.index + 1}${item.label}`)
+    .join("；")}）`;
+}
+
+function inferDynamicImageRatioLabel(aspectRatio) {
+  const numeric = Number(aspectRatio);
+  if (!Number.isFinite(numeric) || numeric <= 0) {
+    return "按分析图原始比例";
+  }
+
+  if (numeric <= 0.78) {
+    return "3:4 竖图";
+  }
+
+  if (numeric >= 1.2) {
+    return "4:3 横图";
+  }
+
+  return "1:1 方图";
+}
+
+function inferDynamicImageStyleName(analysis, serial) {
+  const combined = [
+    String(analysis?.style || "").trim(),
+    String(analysis?.background || "").trim(),
+    String(analysis?.light || "").trim(),
+    String(analysis?.color || "").trim(),
+    String(analysis?.mood || "").trim(),
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  if (/夜间|街景光斑/.test(combined)) {
+    return "夜景氛围纪实风";
+  }
+
+  if (/门店|吧台/.test(combined)) {
+    return "门店氛围打卡风";
+  }
+
+  if (/天空|绿植|户外/.test(combined)) {
+    return "户外自然治愈风";
+  }
+
+  if (/建筑线条|结构透视|空间线条/.test(combined)) {
+    return "空间结构叙事风";
+  }
+
+  if (/桌面|简洁室内/.test(combined)) {
+    return "静物陈列质感风";
+  }
+
+  if (/暖/.test(combined)) {
+    return "暖调生活方式风";
+  }
+
+  if (/冷/.test(combined)) {
+    return "冷调纪实随拍风";
+  }
+
+  return `根据分析图${serial}动态识别的风格`;
+}
+
+function inferDynamicSceneType(analysis) {
+  const combined = [
+    String(analysis?.background || "").trim(),
+    String(analysis?.style || "").trim(),
+    String(analysis?.mood || "").trim(),
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  if (/门店|吧台|咖啡店|店内/.test(combined)) {
+    return "门店到店打卡场景";
+  }
+
+  if (/桌面|托盘|摆拍|静物/.test(combined)) {
+    return "桌面静物特写场景";
+  }
+
+  if (/窗边|窗景/.test(combined)) {
+    return "窗边氛围场景";
+  }
+
+  if (/户外|街景|自然/.test(combined)) {
+    return "户外生活方式场景";
+  }
+
+  return "真实生活方式场景";
+}
+
+function buildDynamicImageCoreElements(analysis, serial) {
+  const details = String(analysis?.details || "").trim();
+  if (details) {
+    return details;
+  }
+
+  return `根据分析图${serial}补充饮品杯、托盘、桌面、立牌、植物、窗框、灯具、手部或周边陪体`;
+}
+
+function buildDynamicImageCompositionLine(analysis, serial) {
+  const composition = String(analysis?.composition || "").trim();
+  const camera = String(analysis?.camera || "").trim();
+  if (composition && camera) {
+    return `${composition}，${camera}`;
+  }
+
+  if (composition || camera) {
+    return composition || camera;
+  }
+
+  return `根据分析图${serial}补充景别、机位、视角、主体重心、留白与前后景关系`;
+}
+
+function buildDynamicImageLightColorLine(analysis, serial) {
+  const light = String(analysis?.light || "").trim();
+  const color = String(analysis?.color || "").trim();
+  if (light && color) {
+    return `${light}，${color}`;
+  }
+
+  if (light || color) {
+    return light || color;
+  }
+
+  return `根据分析图${serial}补充主光方向、亮暗过渡、阴影关系、主色调和冷暖关系`;
+}
+
+function buildDynamicImagePromptCodeBlock(serial, styleName, ratioLabel, analysis, sceneType) {
+  const background = String(analysis?.background || `根据分析图${serial}动态提炼真实空间层次`).trim();
+  const composition = buildDynamicImageCompositionLine(analysis, serial);
+  const lightColor = buildDynamicImageLightColorLine(analysis, serial);
+  const material = String(analysis?.material || `根据分析图${serial}补充真实材质与表面细节`).trim();
+  const details = buildDynamicImageCoreElements(analysis, serial);
+  const mood = String(analysis?.mood || `根据分析图${serial}补充真实生活方式氛围`).trim();
+
+  return [
+    `请生成一张${sceneType}的${styleName}图片，主体固定使用变量 {{ $('输入参数汇总').item.json['图片信息'][0] }} 与 {{ $('输入参数汇总').item.json['图片信息'] }} 中的产品图。`,
+    "主体产品必须保持原始外形、比例、包装结构、品牌文字与关键细节，不变形、不变色、不增删元素。",
+    `场景空间：${background}。`,
+    `核心元素：${details}。`,
+    `构图与镜头：${composition}。`,
+    `光线与色彩：${lightColor}。`,
+    `材质细节：${material}。`,
+    `整体氛围：${mood}。`,
+    `画面比例：${ratioLabel}。`,
+    "画面必须是高还原度真实摄影质感，带自然噪点、真实反光、真实阴影、轻微景深和生活痕迹，弱化AI合成感。",
+    "禁止出现任何新增文字、LOGO、标签、贴纸、二维码、错误品牌信息、乱码、水印和无关装饰元素。",
+  ].join(" ");
 }
 async function generatePromptsWithAi(result, options = {}) {
   if (AI_PROVIDER === "grobotai") {
@@ -590,7 +882,11 @@ async function generatePromptsWithAi(result, options = {}) {
         rewritePrompt:
           target === "image" ? "" : formatRewritePromptOutput(promptJson.rewrite_prompt),
         imagePrompt:
-          target === "rewrite" ? "" : formatImagePromptOutput(promptJson.image_prompt),
+          target === "rewrite"
+            ? ""
+            : formatImagePromptOutput(
+                composeFixedImagePrompt(promptJson.image_prompt, result, options.imageDirection)
+              ),
         debugMessages: target === "image" ? [] : payload.messages,
       };
     }
@@ -684,7 +980,11 @@ async function generatePromptsWithGrobotai(result, options = {}) {
         rewritePrompt:
           target === "image" ? "" : formatRewritePromptOutput(promptJson.rewrite_prompt),
         imagePrompt:
-          target === "rewrite" ? "" : formatImagePromptOutput(promptJson.image_prompt),
+          target === "rewrite"
+            ? ""
+            : formatImagePromptOutput(
+                composeFixedImagePrompt(promptJson.image_prompt, result, options.imageDirection)
+              ),
         debugMessages: target === "image" ? [] : payload.messages,
       };
     }
@@ -958,7 +1258,14 @@ function buildAiUserContentLegacy(result, imageUrls, options = {}) {
     "2. 必须结构化输出，至少包含：【标题策略】【正文结构】【语气风格】【关键信息锚点】【标签策略】【写作限制】。",
     "3. 要明确标题长度、正文长度、语气、结构、叙述视角、重点信息、结尾方式等。",
     "4. 要保留原笔记的人味和平台语感，避免空泛模板话。",
-    "5. 如果仿写提示词方向不为空，请按 0.5 权重吸收：可以调节语气、表达方式、结构重心，但不能推翻原笔记核心信息。",
+    "5. 必须分析原笔记的写法，而不只是总结主题；重点识别标题和开头用了什么钩子，例如反差钩子、结果先行、提问式、痛点式、清单式、劝告式、悬念式、身份背书式。",
+    "6. 必须识别原笔记对数字的使用方式：是否用了数量词、步骤编号、时间/金额/频次/比例、排名、区间、对比数字；如果原文没有数字，不要硬编，但要说明是否适合补充数字增强记忆点。",
+    "7. 必须识别原笔记的语气和口吻：是分享感、安利感、劝退感、吐槽感、复盘感、闺蜜聊天感、专业建议感，还是冷静克制型；同时说明情绪浓度、主观判断强弱、口语化程度。",
+    "8. 必须识别原笔记的节奏和句式：短句/长句比例、是否高频断句、是否用排比、对比、设问、感叹、反问、括号补充、破折号式转折、口头语、强调词。",
+    "9. 必须识别原笔记的信息组织方式：先结论后展开、先场景后观点、先痛点后方案、先体验后总结、先对比后推荐，还是清单分点推进。",
+    "10. 关键信息锚点里要拆出哪些内容必须保留原貌或同等力度复现，例如核心卖点、使用场景、个人感受、对比对象、结果反馈、品牌词、产品名、价格信息、时间信息、行动建议。",
+    "11. 写作限制里要明确：允许模仿写法，但不能照抄原句；不能编造原文没有的事实、数据、体验、效果或立场。",
+    "12. 如果仿写提示词方向不为空，请按 0.5 权重吸收：可以调节语气、表达方式、结构重心，但不能推翻原笔记核心信息。",
     "",
     "image_prompt 要求：",
     "1. 必须输出强结构化模板，不能写成一大段，且必须是可直接粘贴到工作流中的模板。",
@@ -1453,7 +1760,7 @@ function formatRewritePromptOutput(value) {
 
   let formatted = value.replace(/\r/g, "").trim();
   formatted = formatted.replace(/\s*(【标题策略】|【正文结构】|【语气风格】|【关键信息锚点】|【标签策略】|【写作限制】)/g, "\n$1\n");
-  formatted = formatted.replace(/\s*(标题：|正文：|标签：)/g, "\n$1");
+  formatted = formatted.replace(/\s*(标题：|正文：|标签：|开头钩子：|数字策略：|句式节奏：|叙述视角：|结尾收束：)/g, "\n$1");
   formatted = formatted.replace(/\n{3,}/g, "\n\n");
   return formatted.trim();
 }
@@ -1464,7 +1771,7 @@ function formatImagePromptOutput(value) {
   }
 
   let formatted = value.replace(/\r/g, "").trim();
-  formatted = formatted.replace(/\s*(【变量占位（固定保留）】|【核心主题】|【生成参数】|【\d+种风格精准规范（对应抓取图）】|【7种风格精准规范（可复用）】|【终极禁用规则（绝对执行）】|【统一画面基调】)/g, "\n$1\n");
+  formatted = formatted.replace(/\s*(【变量占位（固定保留）】|【核心主题】|【生成参数】|【\d+种风格精准规范（对应抓取图）】|【\d+种风格精准规范（可复用）】|【终极禁用规则（绝对执行）】|【统一画面基调】)/g, "\n$1\n");
   formatted = formatted.replace(/\s*(====================)/g, "\n\n$1\n");
   formatted = formatted.replace(/\s*(以下仅作为风格参考)/g, "\n$1\n");
   formatted = formatted.replace(/\s*(【图[一二三四五六七八九十]+】)/g, "\n\n====================\n$1\n");

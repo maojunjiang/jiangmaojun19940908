@@ -458,6 +458,7 @@ async function buildImageAnalysisPayload(result) {
     prompt: scene.prompt || "",
     negative: scene.negative || "",
     params: scene.params || "",
+    aspectRatio: Number.isFinite(scene.aspectRatio) ? scene.aspectRatio : null,
     spreadX: Number.isFinite(scene.spreadX) ? scene.spreadX : null,
     spreadY: Number.isFinite(scene.spreadY) ? scene.spreadY : null,
   }));
@@ -740,116 +741,116 @@ function buildFixedAiImageTemplate(result, scenes, direction = "") {
     ? scenes.slice(0, IMAGE_PROMPT_REFERENCE_LIMIT)
     : [buildSceneProfileFallback(result, analyzeNoteProfile(result), 0)];
   const styleCount = safeScenes.length;
-  const typeLabel = inferAutoImageTypeLabel(result);
+  const profile = analyzeNoteProfile(result);
+  const theme = inferSceneTransferTemplateTheme(result, profile);
+  const ratioText = buildDynamicSceneRatioSummary(safeScenes);
   const styleBlocks = safeScenes
-    .map((scene, index) => buildFixedAiImageStyleBlock(result, scene, index))
+    .map((scene, index) => buildDynamicSceneStyleTemplateBlock(scene, index))
     .join("\n\n");
 
   return [
+    "【变量占位（固定保留）】",
+    `- 正文内容：${vars.content}`,
+    `- 主体产品图/场景图列表：${vars.imageList}`,
+    `- 标题：${vars.title}`,
+    `- 主体产品图首图：${vars.firstImage}`,
+    "",
     "【核心主题】",
-    `以标题“${vars.title}”为核心，结合正文“${vars.content}”和产品图“${vars.logoHint}”，LOGO“${vars.logoHint}”作为依据生成${typeLabel}。`,
+    `以标题“${vars.title}”为核心，结合正文“${vars.content}”和产品图“${vars.firstImage}”，产品图“${vars.imageList}”作为依据生成${theme.outputLabel}。`,
     "",
     "【生成参数】",
-    `- 生成图片数量：${styleCount} 张，${styleCount} 种风格各生成 1 张`,
-    "- 图片比例：9:16 竖图",
-    "- 输出要求：每张图独立风格，不混合、不简化，统一视觉调性",
-    "- 死规则：图片分析结果只能替换模板里的视觉/风格描述字段，不能改写固定变量、核心主体规则、禁用规则、品牌信息骨架和生成参数",
-    ...(direction ? [`- 额外方向：${direction}`] : []),
+    `- 生成图片数量：${styleCount} 张，${styleCount}种风格各生成1张`,
+    `- 图片比例：${ratioText}`,
+    "- 输出要求：每张图独立风格，不混合、不简化，统一视觉调性；**图片中不得出现任何文字、LOGO、标签、贴纸类元素**；**强化真实生活感，弱化AI合成感**",
+    `- 产品保持基准：主体产品以“${vars.firstImage}”为唯一依据，不变形、不变色、不增删元素/文字`,
+    `- 场景参考输入：主体产品图/场景图列表统一引用“${vars.imageList}”`,
+    ...(direction
+      ? [`- 额外方向（权重 0.5）：${direction}`, "- 方向吸收规则：只中度影响风格强调和氛围包装，不覆盖产品保持规则与对应分析图风格骨架。"]
+      : []),
     "",
     `【${styleCount}种风格精准规范（可复用）】`,
     styleBlocks,
     "",
     "【终极禁用规则（绝对执行）】",
-    "1. 只允许出现：主标题 + 副标题 + 品牌名 + 底部产品卖点/昵称小字，禁止任何其他文字",
-    "2. 禁止日期、网址、二维码、乱码、符号、多余小字",
-    "3. 产品必须为核心视觉主体，占比≥40%，清晰完整，不被遮挡",
-    "4. 禁止3D渲染、夸张光影、杂乱元素，严格保留清新专业质感",
-    "5. 色彩必须严格匹配场景与分析图主色调，不偏离参考图气质",
-    `6. 禁止LOGO「${vars.logoHint}」变形、变色、新增或删减元素`,
-    `7. 禁止产品图「${vars.logoHint}」变形、变色、新增或删减元素/文字`,
-    "8. 禁止文字乱码、变形、不清晰；禁止文字乱码、变形、不清晰；禁止文字乱码、变形、不清晰；",
+    "1. **严格禁止图片中出现任何文字、LOGO、标签、贴纸、二维码、装饰性文字元素**，背景文字需完全模糊至不可辨认",
+    "2. 禁止日期、网址、二维码、乱彩符号、多余装饰文字",
+    "3. 产品必须为核心视觉主体，占比≥40%，清晰完整不被遮挡",
+    "4. 禁止过度干净或完美的AI质感，必须加入**环境噪点、轻微模糊、动态人物、真实生活细节**强化实拍感",
+    "5. 色彩与场景必须严格匹配对应分析图，不得混用其他分析图风格",
+    `6. 禁止产品图“${vars.firstImage}”变形、变色、增删元素/文字`,
+    "7. 禁止出现乱码、文字不清晰！禁止出现乱码、文字不清晰！禁止出现乱码、文字不清晰！",
   ].join("\n");
 }
 
-
-function buildFixedAiImageStyleBlock(result, scene, index) {
-  const vars = WORKFLOW_TEMPLATE_VARIABLES;
-  const styleName = inferFixedAiStyleName(scene, index + 1);
-  const title = vars.title;
-  const content = vars.content;
-  const color = String(scene?.color || "根据分析图补充主色调").trim();
-  const background = String(scene?.background || "根据分析图补充场景背景与空间层次").trim();
-  const composition = String(scene?.composition || "产品居中，主体清晰，保留前中后景层次").trim();
-  const camera = String(scene?.camera || "平视或轻微俯仰视角，真实镜头语言").trim();
-  const light = String(scene?.light || "柔和自然光，保留真实阴影关系").trim();
-  const material = String(scene?.material || "突出真实材质与表面纹理").trim();
-  const details = String(scene?.details || "保留边缘轮廓、反光、水珠、接缝、指纹等真实细节").trim();
-  const mood = String(scene?.mood || "清新专业，真实拍摄感").trim();
-  const typography = buildFixedAiTypography(scene);
+function buildDynamicSceneStyleTemplateBlock(scene, index) {
+  const serial = index + 1;
+  const styleName = inferSceneTransferStyleName(scene);
+  const ratioLabel = inferSceneAspectRatioLabel(scene?.aspectRatio);
+  const productRatio = inferSceneTransferProductRatio(scene);
+  const background = String(scene?.background || "根据对应分析图动态填写真实场景空间、前后景关系与环境层次").trim();
+  const composition = String(scene?.composition || "根据对应分析图动态填写主体摆放、留白关系与画面重心").trim();
+  const camera = String(scene?.camera || "根据对应分析图动态填写景别、机位与视角").trim();
+  const light = String(scene?.light || "根据对应分析图动态填写主光方向、亮部控制与阴影关系").trim();
+  const color = String(scene?.color || "根据对应分析图动态填写主色调、冷暖关系与颜色层次").trim();
+  const material = String(scene?.material || "根据对应分析图动态填写表面材质、纹理、反光和真实细节").trim();
+  const details = String(scene?.details || "根据对应分析图动态填写器具、道具、水珠、指纹、边缘与环境痕迹").trim();
+  const mood = String(scene?.mood || "根据对应分析图动态填写生活方式氛围与情绪感受").trim();
 
   return [
     "---",
-    `### 风格${index + 1}：${styleName}`,
+    `### 风格${serial}：${styleName}`,
+    `- 对应分析图：图${serial}`,
+    `- 参考比例：${ratioLabel}`,
     "#### 背景层",
-    `1. 底色：${color}`,
-    `2. 辅助元素：${background}；仅描述对应抓取图里真实可见的通用场景元素，不写具体品牌和 logo`,
+    `1. 场景空间：${background}`,
+    `2. 道具与环境元素：根据图${serial}动态补充真实可见的桌面、吧台、窗景、植物、餐具、器具、手部、人物或空间陪体，不写具体品牌与logo`,
     "#### 产品层",
-    `核心主体：高清产品瓶身，占比45%，${composition}，${camera}，${light}，${material}，${details}；仅补充对应抓取图里可复用的通用视觉特征`,
-    "点缀元素：根据分析图补充同色系辅助元素、空间陪体和装饰细节，不喧宾夺主，不写具体品牌与商标",
-    ...(typography
-      ? [
-          "#### 文字层",
-          `主标题：${title}，${typography}`,
-          `内容文案：${content}，根据分析图中的文字编排方式动态填写字号层级、段落密度、对齐方式与留白关系`,
-        ]
-      : []),
-    "#### 品牌信息层",
-    `顶部：LOGO「${vars.logoHint}」，固定不变形，不变色，不新增或删减元素，不允许被抓取图分析结果改写`,
-    `底部：固定保留产品核心卖点/昵称小字结构，黑体，字号20px，居中；氛围：${mood}`,
+    `1. 主体产品：固定使用变量 {{ $('输入参数汇总').item.json['图片信息'][0] }} 与 {{ $('输入参数汇总').item.json['图片信息'] }}，主体占比约${productRatio}，保持原始外形、比例、包装结构和关键细节不变`,
+    `2. 构图与镜头：${composition}，${camera}`,
+    `3. 光线与色彩：${light}，${color}`,
+    `4. 材质细节：${material}，${details}`,
+    "#### 氛围强化",
+    `- 整体氛围：${mood}`,
+    "- 强化真实手机/相机实拍感、自然噪点、真实反光、真实阴影、轻微景深，不要出现AI拼接感",
+    `- 画面比例保持${ratioLabel}，整体风格只吸收图${serial}的视觉特征，不与其他分析图混合`,
   ].join("\n");
 }
 
-function buildFixedAiTypography(scene) {
-  if (!sceneHasTypography(scene)) {
-    return "";
+function buildDynamicSceneRatioSummary(scenes) {
+  const safeScenes = Array.isArray(scenes) ? scenes.filter(Boolean) : [];
+  if (!safeScenes.length) {
+    return "按分析图原始比例输出";
   }
 
-  const typography = String(scene?.typography || "").trim();
-  if (typography) {
-    return typography.replace("；若无则保持无文字。", "").replace("若无则保持无文字。", "").trim();
+  const labels = safeScenes.map((scene, index) => ({
+    index,
+    label: inferSceneAspectRatioLabel(scene?.aspectRatio),
+  }));
+  const uniqueLabels = Array.from(new Set(labels.map((item) => item.label)));
+
+  if (uniqueLabels.length === 1) {
+    return `${uniqueLabels[0]}（与分析图一致）`;
   }
 
-  return "根据分析图动态填写字体气质、字号、位置、排版节奏与文字留白";
+  return `按分析图原始比例输出（${labels
+    .map((item) => `图${item.index + 1}${item.label}`)
+    .join("；")}）`;
 }
 
-function sceneHasTypography(scene) {
-  if (scene?.hasTextOverlay === true) {
-    return true;
+function inferSceneAspectRatioLabel(aspectRatio) {
+  if (!Number.isFinite(aspectRatio) || aspectRatio <= 0) {
+    return "按分析图原始比例";
   }
 
-  if (scene?.hasTextOverlay === false) {
-    return false;
+  if (aspectRatio <= 0.78) {
+    return "3:4 竖图";
   }
 
-  const typography = String(scene?.typography || "").trim();
-  return Boolean(typography && !typography.includes("\u65e0\u6587\u5b57"));
-}
-
-function inferFixedAiStyleName(scene, serial) {
-  const combined = [
-    String(scene?.style || "").trim(),
-    String(scene?.background || "").trim(),
-    String(scene?.mood || "").trim(),
-  ]
-    .filter(Boolean)
-    .join(" ");
-
-  const tokens = combined.split(/\s+/).filter(Boolean);
-  if (tokens.length) {
-    return `${tokens[0]}\u98ce`;
+  if (aspectRatio >= 1.2) {
+    return "4:3 横图";
   }
 
-  return `\u6839\u636e\u5206\u6790\u56fe${serial}\u52a8\u6001\u751f\u6210\u7684\u98ce\u683c`;
+  return "1:1 方图";
 }
 
 function inferAutoImageTypeLabel(result) {
@@ -1048,11 +1049,17 @@ function buildRewritePromptV2(result, direction = "") {
     `11. 开头方式参考：${profile.openingHint}。`,
     `12. 中间段落重点参考：${profile.middleHint}。`,
     `13. 结尾方式参考：${profile.endingHint}。`,
-    "14. 标题字数不超过18字；如含英文，总长度不超过15字。",
-    "15. 正文字数控制在200-600字内。",
-    "16. 标签数量5-8个，单个标签长度不超过10个字。",
-    "17. 不要套话、空话、总结腔或行业通稿，要像真实用户亲自写的。",
-    "18. 输出结构固定为：【标题策略】【正文结构】【语气风格】【关键信息锚点】【标签策略】【写作限制】。",
+    "14. 要分析原笔记的标题和开头钩子类型，例如反差、提问、结果先行、痛点、清单、悬念、劝告、身份背书，并在提示词里明确要求复刻。",
+    "15. 要分析原笔记是否使用数字增强表达，例如数量词、步骤编号、时间、价格、频次、比例、区间、排名或对比数字；如果原文没有数字，不要强行添加，但可说明是否适合补充数字增强记忆点。",
+    "16. 要分析原笔记的语气与句式：是聊天感、安利感、吐槽感、复盘感、专业建议感还是克制说明型；同时识别短句/长句比例、断句习惯、排比、对比、设问、反问、感叹、括号补充、口头语和强调词。",
+    "17. 要分析原笔记的信息组织方式：先结论后展开、先场景后观点、先痛点后方案、先体验后总结、先对比后推荐，还是清单式推进。",
+    "18. 关键信息锚点里要明确哪些内容必须保留原貌或同等力度复现，例如核心卖点、场景、个人感受、对比对象、结果反馈、品牌词、产品名、价格和时间信息。",
+    "19. 标题字数不超过18字；如含英文，总长度不超过15字。",
+    "20. 正文字数控制在200-600字内。",
+    "21. 标签数量5-8个，单个标签长度不超过10个字。",
+    "22. 不要套话、空话、总结腔或行业通稿，要像真实用户亲自写的。",
+    "23. 允许模仿写法，但不能照抄原句，也不能编造原文没有的事实、数据、体验、效果或立场。",
+    "24. 输出结构固定为：【标题策略】【正文结构】【语气风格】【关键信息锚点】【标签策略】【写作限制】；并在合适的小项中明确写出“开头钩子”“数字策略”“句式节奏”“叙述视角”“结尾收束”。",
   ];
 
   if (direction) {
@@ -2277,6 +2284,7 @@ function buildSceneProfileFromVisual(result, profile, visual, index) {
     prompt,
     negative: buildVisualNegativePrompt(visual),
     params: buildVisualParamHint(visual),
+    aspectRatio: visual.aspectRatio,
     spreadX: visual.spreadX,
     spreadY: visual.spreadY,
     index,
@@ -2313,6 +2321,7 @@ function buildSceneProfileFallback(result, profile) {
     negative:
       "不要出现第二个主产品，不要加入品牌logo或大段文字，不要塑料感CG，不要过度磨皮，不要文字乱码。",
     params: "画幅 3:4，写实强度中高，清晰度优先，细节优先。",
+    aspectRatio: 0.75,
     spreadX: 0.25,
     spreadY: 0.25,
   };
