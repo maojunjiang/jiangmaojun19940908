@@ -32,7 +32,7 @@ const copyImagePromptButton = document.querySelector("#copy-image-prompt-button"
 const FALLBACK_IMAGE =
   "https://images.unsplash.com/photo-1517841905240-472988babdf9?auto=format&fit=crop&w=1200&q=80";
 const MAX_REFERENCE_MEDIA = 14;
-const MAX_IMAGE_PROMPT_ANALYSIS_COUNT = 8;
+const IMAGE_PROMPT_REFERENCE_LIMIT = 8;
 const DEFAULT_SUBMIT_BUTTON_TEXT = "开始解析";
 const HISTORY_STORAGE_KEY = "note-parser:url-history";
 const HISTORY_LIMIT = 12;
@@ -44,7 +44,6 @@ const WORKFLOW_TEMPLATE_VARIABLES = Object.freeze({
   imageList: "{{ $('输入参数汇总').item.json['图片信息'] }}",
   productImageList: "{{ $('文案提示词').item.json.image_url_list }}",
   firstImage: "{{ $('输入参数汇总').item.json['图片信息'][0] }}",
-  secondImage: "{{ $('输入参数汇总').item.json['图片信息'][1] }}",
   logoHint: "{{ $('输入参数汇总').item.json['用户输入2'] }}",
   forbiddenLogo: "{{ $('输入参数汇总').item.json['用户输入3'] }}",
 });
@@ -535,20 +534,19 @@ function getPromptNotGeneratedText() {
   return "未通过大模型生成提示词";
 }
 
-function getPromptGenerationErrorText(error) {
-  const message = typeof error?.message === "string" ? error.message.trim() : "";
-
-  if (!message) {
+function formatDirectRewritePromptOutput(value) {
+  const normalized = typeof value === "string" ? value.trim() : "";
+  if (!normalized) {
     return getPromptNotGeneratedText();
   }
 
-  if (
-    /请先登录|401|token.*失效|token.*过期|unauthorized|authorization/i.test(message)
-  ) {
-    return "大模型调用失败：Token 已失效或未登录，请更换新的 API Token。";
-  }
-
-  return `大模型调用失败：${message}`;
+  return [
+    "标题不超过18字",
+    "正文300-600字",
+    "标签5-8个",
+    "",
+    normalized,
+  ].join("\n");
 }
 
 async function hydratePromptOutputs(result, options = {}) {
@@ -575,11 +573,11 @@ async function hydratePromptOutputs(result, options = {}) {
 
     if (rewriteRequestId === rewritePromptRequestSerial) {
       setPromptMessagesOutput(rewriteMessagesOutput, aiPrompts.debugMessages);
-      resultPrompt.value = aiPrompts.rewritePrompt || getPromptNotGeneratedText();
+      resultPrompt.value = formatDirectRewritePromptOutput(aiPrompts.rewritePrompt);
     }
   } catch (error) {
     if (rewriteRequestId === rewritePromptRequestSerial) {
-      resultPrompt.value = getPromptGenerationErrorText(error);
+      resultPrompt.value = getPromptNotGeneratedText();
       setPromptMessagesOutput(rewriteMessagesOutput, error?.debugMessages);
     }
   }
@@ -605,14 +603,14 @@ async function hydrateAiImagePrompt(result, requestId, direction = "") {
       return;
     }
 
-    setPromptMessagesOutput(imageMessagesOutput, aiPrompts.debugMessages);
+    setPromptMessagesOutput(imageMessagesOutput, []);
     resultImagePrompt.value = aiPrompts.imagePrompt || getPromptNotGeneratedText();
   } catch (error) {
     if (requestId !== imagePromptRequestSerial) {
       return;
     }
-    resultImagePrompt.value = getPromptGenerationErrorText(error);
-    setPromptMessagesOutput(imageMessagesOutput, error?.debugMessages);
+    resultImagePrompt.value = getPromptNotGeneratedText();
+    setPromptMessagesOutput(imageMessagesOutput, []);
   }
 }
 
@@ -629,7 +627,7 @@ async function hydrateImageGenerationPromptFallback(result, requestId, direction
       return;
     }
 
-    resultImagePrompt.value = buildImagePromptFallback(result, direction);
+    resultImagePrompt.value = getPromptNotGeneratedText();
   }
 }
 
@@ -654,13 +652,13 @@ async function regenerateRewritePrompt() {
       return;
     }
 
-    resultPrompt.value = aiPrompts.rewritePrompt || getPromptNotGeneratedText();
+    resultPrompt.value = formatDirectRewritePromptOutput(aiPrompts.rewritePrompt);
   } catch (error) {
     if (requestId !== rewritePromptRequestSerial) {
       return;
     }
 
-    resultPrompt.value = getPromptGenerationErrorText(error);
+    resultPrompt.value = getPromptNotGeneratedText();
   } finally {
     if (requestId === rewritePromptRequestSerial) {
       setRegenerateButtonState(regeneratePromptButton, true, "重新生成");
@@ -688,15 +686,15 @@ async function regenerateImagePrompt() {
       return;
     }
 
-    setPromptMessagesOutput(imageMessagesOutput, aiPrompts.debugMessages);
-    resultImagePrompt.value = aiPrompts.imagePrompt || getPromptNotGeneratedText();
+    setPromptMessagesOutput(imageMessagesOutput, []);
+      resultImagePrompt.value = aiPrompts.imagePrompt || getPromptNotGeneratedText();
   } catch (error) {
     if (requestId !== imagePromptRequestSerial) {
       return;
     }
 
-    resultImagePrompt.value = getPromptGenerationErrorText(error);
-    setPromptMessagesOutput(imageMessagesOutput, error?.debugMessages);
+    resultImagePrompt.value = getPromptNotGeneratedText();
+    setPromptMessagesOutput(imageMessagesOutput, []);
   } finally {
     if (requestId === imagePromptRequestSerial) {
       setRegenerateButtonState(regenerateImagePromptButton, true, "重新生成");
@@ -710,6 +708,164 @@ function getRewriteDirectionValue() {
 
 function getImageDirectionValue() {
   return typeof imageDirectionInput?.value === "string" ? imageDirectionInput.value.trim() : "";
+}
+
+function normalizeAiImagePromptTemplate(aiPrompt, result, direction = "") {
+  const normalized = typeof aiPrompt === "string" ? aiPrompt.trim() : "";
+  if (!normalized) {
+    return getPromptNotGeneratedText();
+  }
+
+  const profile = analyzeNoteProfile(result);
+  const imageUrls = collectPromptAnalysisImageUrls(result);
+  const cachedScenes = imageUrls
+    .map((imageUrl, index) => {
+      const cacheKey = buildImageDedupKey(imageUrl);
+      const cached = imagePromptAnalysisCache.get(cacheKey);
+      if (!cached || typeof cached.then === "function") {
+        return buildSceneProfileFallback(result, profile, index);
+      }
+      return cached;
+    })
+    .filter(Boolean);
+
+  const scenes = cachedScenes.length ? cachedScenes : [buildSceneProfileFallback(result, profile, 0)];
+  return buildFixedAiImageTemplate(result, scenes, direction);
+}
+
+
+function buildFixedAiImageTemplate(result, scenes, direction = "") {
+  const vars = WORKFLOW_TEMPLATE_VARIABLES;
+  const safeScenes = Array.isArray(scenes) && scenes.length
+    ? scenes.slice(0, IMAGE_PROMPT_REFERENCE_LIMIT)
+    : [buildSceneProfileFallback(result, analyzeNoteProfile(result), 0)];
+  const styleCount = safeScenes.length;
+  const typeLabel = inferAutoImageTypeLabel(result);
+  const styleBlocks = safeScenes
+    .map((scene, index) => buildFixedAiImageStyleBlock(result, scene, index))
+    .join("\n\n");
+
+  return [
+    "【核心主题】",
+    `以标题“${vars.title}”为核心，结合正文“${vars.content}”和产品图“${vars.logoHint}”，LOGO“${vars.logoHint}”作为依据生成${typeLabel}。`,
+    "",
+    "【生成参数】",
+    `- 生成图片数量：${styleCount} 张，${styleCount} 种风格各生成 1 张`,
+    "- 图片比例：9:16 竖图",
+    "- 输出要求：每张图独立风格，不混合、不简化，统一视觉调性",
+    "- 死规则：图片分析结果只能替换模板里的视觉/风格描述字段，不能改写固定变量、核心主体规则、禁用规则、品牌信息骨架和生成参数",
+    ...(direction ? [`- 额外方向：${direction}`] : []),
+    "",
+    `【${styleCount}种风格精准规范（可复用）】`,
+    styleBlocks,
+    "",
+    "【终极禁用规则（绝对执行）】",
+    "1. 只允许出现：主标题 + 副标题 + 品牌名 + 底部产品卖点/昵称小字，禁止任何其他文字",
+    "2. 禁止日期、网址、二维码、乱码、符号、多余小字",
+    "3. 产品必须为核心视觉主体，占比≥40%，清晰完整，不被遮挡",
+    "4. 禁止3D渲染、夸张光影、杂乱元素，严格保留清新专业质感",
+    "5. 色彩必须严格匹配场景与分析图主色调，不偏离参考图气质",
+    `6. 禁止LOGO「${vars.logoHint}」变形、变色、新增或删减元素`,
+    `7. 禁止产品图「${vars.logoHint}」变形、变色、新增或删减元素/文字`,
+    "8. 禁止文字乱码、变形、不清晰；禁止文字乱码、变形、不清晰；禁止文字乱码、变形、不清晰；",
+  ].join("\n");
+}
+
+
+function buildFixedAiImageStyleBlock(result, scene, index) {
+  const vars = WORKFLOW_TEMPLATE_VARIABLES;
+  const styleName = inferFixedAiStyleName(scene, index + 1);
+  const title = vars.title;
+  const content = vars.content;
+  const color = String(scene?.color || "根据分析图补充主色调").trim();
+  const background = String(scene?.background || "根据分析图补充场景背景与空间层次").trim();
+  const composition = String(scene?.composition || "产品居中，主体清晰，保留前中后景层次").trim();
+  const camera = String(scene?.camera || "平视或轻微俯仰视角，真实镜头语言").trim();
+  const light = String(scene?.light || "柔和自然光，保留真实阴影关系").trim();
+  const material = String(scene?.material || "突出真实材质与表面纹理").trim();
+  const details = String(scene?.details || "保留边缘轮廓、反光、水珠、接缝、指纹等真实细节").trim();
+  const mood = String(scene?.mood || "清新专业，真实拍摄感").trim();
+  const typography = buildFixedAiTypography(scene);
+
+  return [
+    "---",
+    `### 风格${index + 1}：${styleName}`,
+    "#### 背景层",
+    `1. 底色：${color}`,
+    `2. 辅助元素：${background}；仅描述对应抓取图里真实可见的通用场景元素，不写具体品牌和 logo`,
+    "#### 产品层",
+    `核心主体：高清产品瓶身，占比45%，${composition}，${camera}，${light}，${material}，${details}；仅补充对应抓取图里可复用的通用视觉特征`,
+    "点缀元素：根据分析图补充同色系辅助元素、空间陪体和装饰细节，不喧宾夺主，不写具体品牌与商标",
+    ...(typography
+      ? [
+          "#### 文字层",
+          `主标题：${title}，${typography}`,
+          `内容文案：${content}，根据分析图中的文字编排方式动态填写字号层级、段落密度、对齐方式与留白关系`,
+        ]
+      : []),
+    "#### 品牌信息层",
+    `顶部：LOGO「${vars.logoHint}」，固定不变形，不变色，不新增或删减元素，不允许被抓取图分析结果改写`,
+    `底部：固定保留产品核心卖点/昵称小字结构，黑体，字号20px，居中；氛围：${mood}`,
+  ].join("\n");
+}
+
+function buildFixedAiTypography(scene) {
+  if (!sceneHasTypography(scene)) {
+    return "";
+  }
+
+  const typography = String(scene?.typography || "").trim();
+  if (typography) {
+    return typography.replace("；若无则保持无文字。", "").replace("若无则保持无文字。", "").trim();
+  }
+
+  return "根据分析图动态填写字体气质、字号、位置、排版节奏与文字留白";
+}
+
+function sceneHasTypography(scene) {
+  if (scene?.hasTextOverlay === true) {
+    return true;
+  }
+
+  if (scene?.hasTextOverlay === false) {
+    return false;
+  }
+
+  const typography = String(scene?.typography || "").trim();
+  return Boolean(typography && !typography.includes("\u65e0\u6587\u5b57"));
+}
+
+function inferFixedAiStyleName(scene, serial) {
+  const combined = [
+    String(scene?.style || "").trim(),
+    String(scene?.background || "").trim(),
+    String(scene?.mood || "").trim(),
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  const tokens = combined.split(/\s+/).filter(Boolean);
+  if (tokens.length) {
+    return `${tokens[0]}\u98ce`;
+  }
+
+  return `\u6839\u636e\u5206\u6790\u56fe${serial}\u52a8\u6001\u751f\u6210\u7684\u98ce\u683c`;
+}
+
+function inferAutoImageTypeLabel(result) {
+  const combined = [
+    String(result?.title || "").trim(),
+    String(result?.body || "").trim(),
+    Array.isArray(result?.tags) ? result.tags.join(" ") : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  if (/(钙|维生素|保健|营养|胶囊|片剂|补充剂|益生菌)/.test(combined)) return "电商保健品海报/图";
+  if (/(咖啡|拿铁|美式|奶茶|果茶|茶饮|饮品|柠檬茶|奶盖)/.test(combined)) return "饮品种草海报/图";
+  if (/(护肤|精华|面霜|水乳|彩妆|口红|粉底|香水)/.test(combined)) return "护肤彩妆海报/图";
+  if (/(包包|鞋子|穿搭|单品|服装|饰品|配件)/.test(combined)) return "穿搭单品海报/图";
+  return "产品海报/图";
 }
 
 function setRegenerateButtonState(button, enabled, text) {
@@ -1127,7 +1283,7 @@ async function buildImageGenerationPrompt(result, direction = "") {
 }
 
 function collectPromptAnalysisImageUrls(result) {
-  return collectRenderableImageUrls(result).slice(0, MAX_IMAGE_PROMPT_ANALYSIS_COUNT);
+  return collectRenderableImageUrls(result).slice(0, IMAGE_PROMPT_REFERENCE_LIMIT);
 }
 
 function buildImagePromptFallback(result, direction = "") {
@@ -2091,6 +2247,10 @@ function buildSceneProfileFromVisual(result, profile, visual, index) {
   const details = describeVisualDetails(visual);
   const typography = "若画面里有招牌、海报或版式文字，可概括其位置与排版节奏；若无则保持无文字。";
   const mood = describeVisualMood(visual);
+  const hasTextOverlay = detectVisualTextPresence(visual);
+  const normalizedTypography = hasTextOverlay
+    ? "画面中有文字信息，需概括其位置、字号对比、对齐方式与排版节奏。"
+    : "";
   const prompt = buildVisualReplicaPrompt({
     composition,
     camera,
@@ -2111,7 +2271,8 @@ function buildSceneProfileFromVisual(result, profile, visual, index) {
     color,
     material,
     details,
-    typography,
+    typography: normalizedTypography,
+    hasTextOverlay,
     mood,
     prompt,
     negative: buildVisualNegativePrompt(visual),
@@ -2129,6 +2290,10 @@ function buildSceneProfileFallback(result, profile) {
   const fallbackLight = inferImageLightingHint(result, profile);
   const fallbackMaterial = inferImageMaterialHint(result, profile);
   const fallbackMood = inferImageAtmosphereHint(result, profile);
+  const hasTextOverlay = inferFallbackHasTextOverlay(result, profile);
+  const typography = hasTextOverlay
+    ? "画面中有文字信息，需概括其位置、字号对比、对齐方式与排版节奏。"
+    : "";
 
   return {
     style: fallbackStyle,
@@ -2141,6 +2306,8 @@ function buildSceneProfileFallback(result, profile) {
     details: "保留清晰主体落位空间和前中后景层次，让主体产品嵌入后仍然自然可信。",
     typography: "若画面存在招牌、海报或版式文字，描述其位置与密度；若无则保持无文字。",
     mood: fallbackMood,
+    typography,
+    hasTextOverlay,
     prompt:
       "将主体产品自然融入当前场景风格中，保留构图、环境层次、机位、光线、配色与氛围特征，输出真实自然的高质量实拍成图。",
     negative:
@@ -2149,6 +2316,29 @@ function buildSceneProfileFallback(result, profile) {
     spreadX: 0.25,
     spreadY: 0.25,
   };
+}
+
+function detectVisualTextPresence(visual) {
+  if (!visual || typeof visual !== "object") {
+    return false;
+  }
+
+  const horizontalBanding = Math.abs((visual.topBrightness || 0) - (visual.bottomBrightness || 0)) >= 16;
+  const structuredLayout = Boolean(visual.hasStructuredLines);
+  const focusedCenter = (visual.spreadX || 0) <= 0.24 && (visual.spreadY || 0) <= 0.22;
+  const cleanSurface = Boolean(visual.isCleanBackground);
+
+  return structuredLayout && (horizontalBanding || focusedCenter || cleanSurface);
+}
+
+function inferFallbackHasTextOverlay(result, profile) {
+  const combined = buildAnalysisText(result);
+
+  if (/(封面|标题|大字|海报|版式|排版|信息图|图文|首图|banner|headline)/i.test(combined)) {
+    return true;
+  }
+
+  return /干净明亮|信息组织清楚|封面逻辑/.test(String(profile?.qualityHint || ""));
 }
 
 function describeVisualStyle(visual) {
