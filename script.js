@@ -43,7 +43,7 @@ const WORKFLOW_TEMPLATE_VARIABLES = Object.freeze({
   content: "{{ $('解析生成内容').item.json.content }}",
   imageList: "{{ $('输入参数汇总').item.json['图片信息'] }}",
   productImageList: "{{ $('文案提示词').item.json.image_url_list }}",
-  locationContext: "{{ $('输入参数汇总').item.json['用户输入1'] }}",
+  locationContext: "{{ $('输入参数汇总').item.json['用户输入'] }}",
   firstImage: "{{ $('输入参数汇总').item.json['图片信息'][0] }}",
   logoHint: "{{ $('输入参数汇总').item.json['用户输入2'] }}",
   forbiddenLogo: "{{ $('输入参数汇总').item.json['用户输入3'] }}",
@@ -520,14 +520,7 @@ function formatDirectRewritePromptOutput(value) {
     return getPromptNotGeneratedText();
   }
 
-  return [
-    "输出结构固定：笔记拆解 5 项 + 最终生文 PROMPT 模板",
-    "标题建议不超过18字",
-    "正文建议200-600字",
-    "标签建议5-8个",
-    "",
-    normalized,
-  ].join("\n");
+  return normalized;
 }
 
 async function hydratePromptOutputs(result, options = {}) {

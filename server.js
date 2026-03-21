@@ -52,7 +52,7 @@ const WORKFLOW_TEMPLATE_VARIABLES = Object.freeze({
   content: "{{ $('解析生成内容').item.json.content }}",
   imageList: "{{ $('输入参数汇总').item.json['图片信息'] }}",
   productImageList: "{{ $('文案提示词').item.json.image_url_list }}",
-  locationContext: "{{ $('输入参数汇总').item.json['用户输入1'] }}",
+  locationContext: "{{ $('输入参数汇总').item.json['用户输入'] }}",
   firstImage: "{{ $('输入参数汇总').item.json['图片信息'][0] }}",
   logoHint: "{{ $('输入参数汇总').item.json['用户输入2'] }}",
   forbiddenLogo: "{{ $('输入参数汇总').item.json['用户输入3'] }}",
@@ -344,14 +344,17 @@ function buildAiSystemPromptV2(target) {
   if (target === "rewrite") {
     lines.push('只输出 {"rewrite_prompt":"..."}。');
     lines.push("把结果写入 rewrite_prompt 字段。");
+    lines.push("rewrite_prompt 字段里的内容必须是一个完整 markdown 代码块字符串，代码块内直接放最终模板。");
   } else if (target === "image") {
     lines.push('只输出 {"image_prompt":"..."}。');
     lines.push("把结果写入 image_prompt 字段。");
     lines.push("image_prompt 必须输出成可直接投喂豆包生图模型的最终 prompt。");
-    lines.push("如果有多张参考图，就按“图一最终Prompt / 图二最终Prompt / ...”分块输出，每块只保留一条最终可用 prompt，不要附加分析说明。");
+    lines.push("image_prompt 字段里的内容必须是一个完整 markdown 代码块字符串，代码块内直接放最终模板。");
+    lines.push("如果有多张参考图，就按“图一 / 图二 / ...”分块输出，每块只保留一条最终可用 prompt，不要附加分析说明。");
   } else {
     lines.push('同时输出 {"rewrite_prompt":"...","image_prompt":"..."}。');
     lines.push("rewrite_prompt 负责复刻内容表达，image_prompt 负责复刻参考图视觉。");
+    lines.push("rewrite_prompt 和 image_prompt 字段里的内容都必须是完整 markdown 代码块字符串，代码块内直接放最终模板。");
   }
 
   return lines.join("\n");
@@ -439,26 +442,22 @@ function buildAiUserContentV2(result, imageUrls, options = {}) {
 
   if (target === "rewrite") {
     lines.push("- 只输出 rewrite_prompt，不要输出 image_prompt。");
-    lines.push("- rewrite_prompt 不是直接写成新笔记，而是先拆解原笔记，再整理成给其他 AI 使用的生文 PROMPT 模板。");
+    lines.push("- rewrite_prompt 不是直接写成新笔记，而是输出给其他 AI 使用的最终生文 PROMPT 模板。");
     lines.push("- 不要出现图片分析、成图说明、镜头语言、画面风格等图片相关内容。");
-    lines.push("- 必须严格按这个固定结构输出，顺序不能改、不能缺项：");
-    lines.push("- 【笔记拆解】");
-    lines.push("- 【1. 标题结构】");
-    lines.push("- 【2. 开头钩子前N句】");
-    lines.push("- 【3. 正文信息模块】");
-    lines.push("- 【4. 高频元素】");
-    lines.push("- 【5. 结尾动作】");
-    lines.push("- 【最终生文 PROMPT 模板】");
-    lines.push("- 5 个拆解模块必须围绕标题、正文、标签来分析，不能扩展成别的分析框架。");
-    lines.push("- 【1. 标题结构】只分析标题写法，必须明确拆出：数字、疑问、情绪、关键词；没有的项也要明确写无。");
-    lines.push("- 【2. 开头钩子前N句】只分析正文开头前 N 句，必须判断更偏向：疑问、惊讶、对比、场景代入；并指出对应原句。");
-    lines.push("- 【3. 正文信息模块】只分析正文主体，必须按逻辑分段或模块化方式拆解，例如：场景描述、故事、案例、数据、方法、体验、结论。");
-    lines.push("- 【4. 高频元素】必须从标题、正文、标签里提炼常见元素，重点识别：数字、对比、避坑、列表、emoji、符号、标签关键词、口头化表达。");
-    lines.push("- 【5. 结尾动作】只分析正文结尾，判断是否存在点赞、收藏、评论、关注、分享、跳转等动作引导；没有就明确写无明显动作引导。");
-    lines.push("- 【最终生文 PROMPT 模板】必须基于前面 5 项拆解结果整理而成，写成可直接复制给其他 AI 的模板。");
-    lines.push("- 最终模板里要明确：标题如何写、开头如何下钩子、正文按什么模块展开、哪些高频元素要保留、结尾如何收束或引导互动、标签如何组织。");
+    lines.push("- rewrite_prompt 必须整体包在一个 markdown 代码块里返回，前端只原样展示，不做额外排版。");
+    lines.push("- 不要输出拆解过程、分析说明、bullet 解释或中间推理，只输出最终模板成品。");
+    lines.push("- 最终模板必须结构化显示，每个模块单独成段，使用“模块名”+换行+“---”+换行+模块内容的形式。");
+    lines.push("- 固定输出这些模块，顺序不能改：标题要求、开头钩子、正文结构、高频元素、结尾动作、标签策略、写作限制。");
+    lines.push("- 每个模块都要直接写给其他 AI 的可执行要求，不要写“分析如下”“原文体现了”这类说明句。");
+    lines.push("- 标题要求要明确标题写法、字数建议、关键词组织方式。");
+    lines.push("- 开头钩子要明确开场句式、情绪强度和进入主题的方式。");
+    lines.push("- 正文结构要明确内容分段逻辑、展开顺序和每段承担的作用。");
+    lines.push("- 高频元素要明确数字、对比、口语感、标签词、列表感、情绪词等保留方式。");
+    lines.push("- 结尾动作要明确如何收束，以及是否引导点赞、收藏、评论、关注或转发。");
+    lines.push("- 标签策略要明确标签数量、标签类型和标签承担的分发作用。");
+    lines.push("- 写作限制要明确哪些能模仿、哪些不能编造、哪些事实必须保持一致。");
     lines.push("- 标签不能只罗列，必须说明标签在关键词覆盖、情绪强化、搜索分发或话题归类上的作用。");
-    lines.push("- 分析重点是拆解笔记写法，不是总结主题，不要输出泛化空话。");
+    lines.push("- 不要输出泛化空话，不要把模板写成空泛行业方法论。");
     lines.push("- 如果原文没有某种元素，不要编造，只能如实说明缺失。");
     lines.push("- 最终模板允许模仿结构和表达策略，但不能要求照抄原句，也不能编造原文没有的事实。");
     lines.push("- 最终模板需补充基本约束：标题建议不超过18字，正文建议200-600字，标签建议5-8个。");
@@ -466,8 +465,12 @@ function buildAiUserContentV2(result, imageUrls, options = {}) {
   } else if (target === "image") {
     lines.push("- 只输出 image_prompt，不要输出 rewrite_prompt。");
     lines.push("- image_prompt 直接写成可投喂豆包生图模型的最终成图提示词，不要写成模板说明文。");
-    lines.push("- 不要输出分析标题、拆解过程、bullet 列表、markdown 代码块、固定头部或固定尾部。");
+    lines.push("- image_prompt 必须整体包在一个 markdown 代码块里返回，前端只原样展示，不做额外排版。");
+    lines.push("- 不要输出分析标题、拆解过程、bullet 解释、固定头部或固定尾部。");
     lines.push("- 每张参考图最终只输出 1 条可直接使用的 prompt。");
+    lines.push("- 最终输出必须按“图一”“---”“prompt内容”“图二”“---”“prompt内容”这种结构展示，不要写成“图一最终Prompt：”。");
+    lines.push("- 每个图块里的 prompt 内容也必须继续结构化分块展示，使用多个加粗小节标题，例如：**场景主体：**、**城市映射：**、**构图与镜头：**、**光线与色彩：**、**画面质感：**、**画面比例：**、**实景实拍要求：**、**负面限制：**。");
+    lines.push("- 每个加粗小节单独成段，不要把所有内容写成一整段长句。");
     lines.push("- prompt 重点保留参考图的画面质感、图片风格、构图镜头、光线色彩、摄影参数、情绪氛围。");
     lines.push("- 不要描述图里具体出现了什么物件、人物、建筑、道具、装饰或空间组件，也不要罗列前景、中景、背景元素。");
     lines.push("- 如果需要体现地点差异，必须写成“地点驱动的地域映射规则”，而不是写死某个城市。");
@@ -479,7 +482,7 @@ function buildAiUserContentV2(result, imageUrls, options = {}) {
     lines.push("- 完整成图提示词必须覆盖：视觉风格、画面质感、镜头景别、机位角度、光线来源、颜色关系、摄影参数、氛围关键词、负面限制。");
     lines.push("- 每张图的 prompt 必须严格围绕对应抓取图的视觉语言来写，不要落到具体元素、具体物件和具体场景细节。");
     lines.push("- 不要在图片分析和视觉提示词里写任何具体品牌名、具体 logo 名称、商标词或品牌故事，只保留可复用的通用视觉描述。");
-    lines.push("- 必须把“真实拍摄”写进模板，例如真实摄影、手机/相机实拍、自然镜头、轻微景深、真实噪点、真实反光和真实阴影。");
+    lines.push("- 必须把“真实拍摄”写进模板，而且这是硬性要求：生成结果必须是实景、实拍、自然画面，明确强调真实摄影、真实场景、自然光影、自然环境痕迹、轻微景深、真实噪点、真实反光和真实阴影。");
     lines.push("- 负面提示要明确排除：AI感过强、CG渲染感、塑料假面、错误结构、细节糊掉、边缘发虚、材质失真、过度锐化、过度磨皮、画面假干净。");
     lines.push("- 如果参考图信息很少，也要尽量把视觉风格依据写具体，不要退化成简单通用模板。");
     lines.push("- 输出时每个风格块都只保留最终 prompt，不要解释你为什么这样写。");
@@ -600,8 +603,8 @@ function buildDynamicImagePromptDynamicSectionSpecV2(styleCount = IMAGE_PROMPT_R
     const sceneType = inferDynamicSceneType(analysis);
     const promptCode = buildDynamicImagePromptCodeBlock(serial, styleName, ratioLabel, analysis, sceneType);
     return [
+      `图${numberToChineseText(serial)}`,
       "---",
-      `图${numberToChineseText(serial)}最终Prompt：`,
       promptCode,
     ].join("\n");
   }).join("\n\n");
@@ -631,7 +634,7 @@ function composeFixedImagePrompt(dynamicContent, result, instruction = "") {
   const dynamicSection =
     extractDynamicImagePromptSection(dynamicContent) ||
     buildDynamicImagePromptDynamicSectionSpecV2(styleCount, result);
-  return dynamicSection;
+  return ensureMarkdownCodeBlock(dynamicSection);
 }
 
 function extractDynamicImagePromptSection(content) {
@@ -641,6 +644,19 @@ function extractDynamicImagePromptSection(content) {
   }
 
   return normalized;
+}
+
+function ensureMarkdownCodeBlock(content) {
+  const normalized = String(content || "").trim();
+  if (!normalized) {
+    return "";
+  }
+
+  if (/^```[\w-]*\n[\s\S]*\n```$/m.test(normalized)) {
+    return normalized;
+  }
+
+  return ["```markdown", normalized, "```"].join("\n");
 }
 
 function buildDynamicImageRatioSummary(analyses, safeCount) {
@@ -826,22 +842,25 @@ function buildDynamicImagePromptCodeBlock(serial, styleName, ratioLabel, analysi
   const material = String(analysis?.material || `根据分析图${serial}补充真实摄影质感、表面纹理与颗粒层次`).trim();
   const mood = String(analysis?.mood || `根据分析图${serial}补充真实生活方式氛围`).trim();
   const params = String(analysis?.params || `根据分析图${serial}补充焦段感、景深、曝光倾向和清晰度控制`).trim();
+  const subjectLine = buildDynamicImageSubjectLine(analysis, serial);
   const locationMapping = buildDynamicLocationMappingLine(serial);
+  const realismRule = "必须生成实景、实拍、自然的真实摄影画面，使用真实场景逻辑、自然光影、自然环境痕迹、轻微景深、真实噪点、真实反光、真实阴影和自然色彩过渡，严禁出现棚拍假感、CG渲染感或过度修图感。";
+  const negativeRule = "禁止出现任何新增文字、LOGO、标签、贴纸、二维码、错误品牌信息、乱码、水印和无关装饰元素，同时避免AI感过强、塑料感、结构错误、边缘发虚、材质失真、过度锐化和画面假干净。";
 
   return [
-    `请生成一张${sceneType}的${styleName}城市地标场景图，主体由地点变量 ${WORKFLOW_TEMPLATE_VARIABLES.locationContext} 决定。`,
-    "主体必须生成该城市的代表性地标、景区或城市名片场景，不再沿用参考图原主体；如果输出多张图，每张图都要是同城不同地标。",
-    "不要根据参考图去硬写具体元素描述，只复用其画面质感、风格语法、构图逻辑、光线关系和摄影感觉，由模型自行补充合理场景细节。",
-    `${locationMapping}`,
-    `构图与镜头：${composition}。`,
-    `光线与色彩：${lightColor}。`,
-    `画面质感：${material}。`,
-    `摄影参数参考：${params}。`,
-    `整体氛围：${mood}。`,
-    `画面比例：${ratioLabel}。`,
-    "画面必须是高还原度真实摄影质感，带自然噪点、真实反光、真实阴影、轻微景深和生活痕迹，弱化AI合成感。",
-    "禁止出现任何新增文字、LOGO、标签、贴纸、二维码、错误品牌信息、乱码、水印和无关装饰元素。",
-  ].join(" ");
+    `**生成目标：** 请生成一张${sceneType}的${styleName}城市地标场景图，主体由地点变量 ${WORKFLOW_TEMPLATE_VARIABLES.locationContext} 决定。`,
+    `**场景主体：** ${subjectLine}。主体必须生成该城市的代表性地标、景区或城市名片场景，不再沿用参考图原主体；如果输出多张图，每张图都要是同城不同地标。`,
+    `**城市映射：** ${locationMapping}`,
+    `**构图与镜头：** ${composition}。`,
+    `**光线与色彩：** ${lightColor}。`,
+    `**画面质感：** ${material}。`,
+    `**摄影参数参考：** ${params}。`,
+    `**整体氛围：** ${mood}。`,
+    `**画面比例：** ${ratioLabel}。`,
+    `**实景实拍要求：** ${realismRule}`,
+    `**补充要求：** 不要根据参考图去硬写具体元素描述，只复用其画面质感、风格语法、构图逻辑、光线关系和摄影感觉，由模型自行补充合理场景细节。`,
+    `**负面限制：** ${negativeRule}`,
+  ].join("\n\n");
 }
 async function generatePromptsWithAi(result, options = {}) {
   if (AI_PROVIDER === "grobotai") {
@@ -2122,17 +2141,9 @@ function formatRewritePromptOutput(value) {
     return "";
   }
 
-  let formatted = value.replace(/\r/g, "").trim();
-  formatted = formatted.replace(
-    /\s*(【笔记拆解】|【1\.\s*标题结构】|【2\.\s*开头钩子前N句】|【3\.\s*正文信息模块】|【4\.\s*高频元素】|【5\.\s*结尾动作】|【最终生文 PROMPT 模板】)/g,
-    "\n$1\n"
+  return ensureMarkdownCodeBlock(
+    canonicalizeWorkflowTemplateVariables(value.replace(/\r/g, "").trim())
   );
-  formatted = formatted.replace(
-    /\s*(标题原文：|标题拆解：|数字：|疑问：|情绪：|关键词：|开头原句：|钩子类型：|钩子作用：|模块拆解：|场景描述：|故事：|案例：|数据：|方法：|体验：|结论：|高频元素总览：|数字元素：|对比元素：|避坑元素：|列表元素：|emoji\/符号：|标签关键词：|结尾原句：|动作类型：|互动引导：|模板目标：|标题要求：|开头要求：|正文要求：|高频元素要求：|结尾要求：|标签要求：|限制要求：)/g,
-    "\n$1"
-  );
-  formatted = formatted.replace(/\n{3,}/g, "\n\n");
-  return formatted.trim();
 }
 
 function formatImagePromptOutput(value) {
@@ -2140,24 +2151,39 @@ function formatImagePromptOutput(value) {
     return "";
   }
 
-  let formatted = value.replace(/\r/g, "").trim();
-  formatted = formatted.replace(/\s*(【核心主题】|【生成参数】|【\d+种风格精准规范（对应抓取图）】|【\d+种风格精准规范（可复用）】|【终极禁用规则（绝对执行）】|【统一画面基调】)/g, "\n$1\n");
-  formatted = formatted.replace(/\s*(====================)/g, "\n\n$1\n");
-  formatted = formatted.replace(/\s*(以下仅作为风格参考)/g, "\n$1\n");
-  formatted = formatted.replace(/\s*(【图[一二三四五六七八九十]+】)/g, "\n\n====================\n$1\n");
-  formatted = formatted.replace(/\s*(图[一二三四五六七八九十]+最终Prompt：)/g, "\n\n====================\n$1\n");
-  formatted = formatted.replace(/\s*(图片\d+：\s*---)/g, "\n\n$1\n");
-  formatted = formatted.replace(/\s*(🌿\s*图片风格分析)/g, "\n$1\n");
-  formatted = formatted.replace(/\s*(✍️\s*可复用 Prompt 模板（支持变量替换）)/g, "\n\n$1\n");
-  formatted = formatted.replace(/\s*(---)/g, "\n\n$1\n");
-  formatted = formatted.replace(/\s*(###\s*风格[^\n]*)/g, "\n\n$1\n");
-  formatted = formatted.replace(/\s*(####\s*(?:背景层|产品层|氛围强化))/g, "\n$1\n");
-  formatted = formatted.replace(/\s*(参考图数量：)/g, "\n$1");
-  formatted = formatted.replace(/\s*(-\s*(?:正文内容|主体产品图\/场景图列表|标题|主体产品图首图|LOGO参考|禁用LOGO|生成图片数量|图片比例|输出要求|产品保持基准|场景参考输入|风格对应规则|模板自包含规则|生成模式|额外生成方向(?:（权重 0\.5）)?|额外方向(?:（权重 0\.5）)?|方向吸收规则|用户补充要求|执行规则|参考图数量|建议比例|内容语境|整体氛围|分析重点|场景迁移原则|整体色调|质感|氛围|产品呈现原则)：)/g, "\n$1");
-  formatted = formatted.replace(/\s*(-\s*(?:风格|构图|景别与机位|空间环境|背景|光线|配色|色彩|材质与表面质感|材质与质感|场景层次与留白|主体与道具细节|文字与版式（如有）|氛围关键词|场景迁移指令|产品主体保持要求|复刻 prompt（产品融合版）|负面提示|参数建议)：)/g, "\n$1");
-  formatted = formatted.replace(/(\n\s*====================\n)(?:\s*====================\n)+/g, "$1");
-  formatted = formatted.replace(/\n{3,}/g, "\n\n");
-  return formatted.trim();
+  return ensureMarkdownCodeBlock(
+    canonicalizeWorkflowTemplateVariables(value.replace(/\r/g, "").trim())
+  );
+}
+
+function canonicalizeWorkflowTemplateVariables(value) {
+  if (typeof value !== "string" || !value.trim()) {
+    return "";
+  }
+
+  const canonicalMap = [
+    {
+      pattern: /\{\{\s*\$\('输入参数汇总'\)\.item\.json\[(["'])用户输入1\1\]\s*\}\}/g,
+      replacement: WORKFLOW_TEMPLATE_VARIABLES.locationContext,
+    },
+    {
+      pattern: /\{\{\s*\$\('输入参数汇总'\)\.item\.json\[(["'])用户输入１\1\]\s*\}\}/g,
+      replacement: WORKFLOW_TEMPLATE_VARIABLES.locationContext,
+    },
+    {
+      pattern: /\{\{\s*\$\('输入参数汇总'\)\.item\.json\[(["'])用户输入２\1\]\s*\}\}/g,
+      replacement: WORKFLOW_TEMPLATE_VARIABLES.logoHint,
+    },
+    {
+      pattern: /\{\{\s*\$\('输入参数汇总'\)\.item\.json\[(["'])用户输入３\1\]\s*\}\}/g,
+      replacement: WORKFLOW_TEMPLATE_VARIABLES.forbiddenLogo,
+    },
+  ];
+
+  return canonicalMap.reduce(
+    (current, entry) => current.replace(entry.pattern, entry.replacement),
+    value
+  );
 }
 
 function truncateErrorText(value) {
