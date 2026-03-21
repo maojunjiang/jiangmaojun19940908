@@ -2,6 +2,7 @@ const http = require("node:http");
 const fs = require("node:fs");
 const path = require("node:path");
 const { URL } = require("node:url");
+const vm = require("node:vm");
 
 loadLocalEnvFiles();
 
@@ -351,6 +352,7 @@ function buildAiSystemPromptV2(target) {
     lines.push("image_prompt 必须输出成可直接投喂豆包生图模型的最终 prompt。");
     lines.push("image_prompt 字段里的内容必须是一个完整 markdown 代码块字符串，代码块内直接放最终模板。");
     lines.push("如果有多张参考图，就按“图一 / 图二 / ...”分块输出，每块只保留一条最终可用 prompt，不要附加分析说明。");
+    lines.push("图块标题、分隔线和加粗小节标题必须严格遵守用户提供的输出骨架，不得改名、不得漏项、不得合并段落。");
   } else {
     lines.push('同时输出 {"rewrite_prompt":"...","image_prompt":"..."}。');
     lines.push("rewrite_prompt 负责复刻内容表达，image_prompt 负责复刻参考图视觉。");
@@ -471,6 +473,8 @@ function buildAiUserContentV2(result, imageUrls, options = {}) {
     lines.push("- 最终输出必须按“图一”“---”“prompt内容”“图二”“---”“prompt内容”这种结构展示，不要写成“图一最终Prompt：”。");
     lines.push("- 每个图块里的 prompt 内容也必须继续结构化分块展示，使用多个加粗小节标题，例如：**场景主体：**、**城市映射：**、**构图与镜头：**、**光线与色彩：**、**画面质感：**、**画面比例：**、**实景实拍要求：**、**负面限制：**。");
     lines.push("- 每个加粗小节单独成段，不要把所有内容写成一整段长句。");
+    lines.push("- 以下骨架属于强约束，必须严格照抄标题与顺序，只替换每个标题下的内容，不能改标题名字，不能删减段落：");
+    lines.push("", buildStrictImagePromptOutputSkeleton(imageUrls.length || 1));
     lines.push("- prompt 重点保留参考图的画面质感、图片风格、构图镜头、光线色彩、摄影参数、情绪氛围。");
     lines.push("- 不要描述图里具体出现了什么物件、人物、建筑、道具、装饰或空间组件，也不要罗列前景、中景、背景元素。");
     lines.push("- 如果需要体现地点差异，必须写成“地点驱动的地域映射规则”，而不是写死某个城市。");
@@ -610,6 +614,40 @@ function buildDynamicImagePromptDynamicSectionSpecV2(styleCount = IMAGE_PROMPT_R
   }).join("\n\n");
 
   return styleBlocks;
+}
+
+function buildStrictImagePromptOutputSkeleton(styleCount = 1) {
+  const safeCount = Math.max(1, Math.min(Number(styleCount) || 1, IMAGE_PROMPT_REFERENCE_LIMIT));
+  return Array.from({ length: safeCount }, (_, index) => {
+    const serial = numberToChineseText(index + 1);
+    return [
+      `图${serial}`,
+      "---",
+      "**生成目标：**",
+      "",
+      "**场景主体：**",
+      "",
+      "**城市映射：**",
+      "",
+      "**构图与镜头：**",
+      "",
+      "**光线与色彩：**",
+      "",
+      "**画面质感：**",
+      "",
+      "**摄影参数参考：**",
+      "",
+      "**整体氛围：**",
+      "",
+      "**画面比例：**",
+      "",
+      "**实景实拍要求：**",
+      "",
+      "**补充要求：**",
+      "",
+      "**负面限制：**",
+    ].join("\n");
+  }).join("\n\n");
 }
 
 function buildDynamicImagePromptFixedSuffix(result = null) {
@@ -2309,7 +2347,7 @@ function extractPrimaryImages(source, noteUrl) {
     }
 
     if (candidates.length) {
-      return dedupeAndRankImages(candidates).slice(0, 24);
+      return dedupeImagesPreserveOrder(candidates).slice(0, 24);
     }
   }
 
@@ -2319,6 +2357,22 @@ function extractPrimaryImages(source, noteUrl) {
   addUniqueImages(candidates, extractInlineImages(source, noteUrl), noteUrl);
 
   return dedupeAndRankImages(candidates).slice(0, 24);
+}
+
+function dedupeImagesPreserveOrder(images) {
+  const seen = new Set();
+  const ordered = [];
+
+  for (const imageUrl of images) {
+    const key = buildImageDedupKey(imageUrl);
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    ordered.push(imageUrl);
+  }
+
+  return ordered;
 }
 
 function addUniqueImages(target, imageCandidates, baseUrl) {
@@ -2536,12 +2590,13 @@ function extractXiaohongshuImage(source, noteUrl) {
 
 function extractXiaohongshuNoteData(source, noteUrl) {
   const noteId = decodeSegmentFromUrl(noteUrl);
+  const initialStateNote = extractXiaohongshuNoteFromInitialState(source, noteId);
   const noteBlock = extractXiaohongshuNoteBlock(source, noteId) || source;
   const parsedNoteBlock = parseXiaohongshuNoteBlock(noteBlock);
-  const note = findXiaohongshuNotePayload(parsedNoteBlock) || {};
+  const note = initialStateNote || findXiaohongshuNotePayload(parsedNoteBlock) || {};
   const listImages = extractXiaohongshuImagesFromImageList(note.imageList);
   const blockImages = extractXiaohongshuImagesFromSource(noteBlock);
-  const noteImages = [...new Set([...listImages, ...blockImages])];
+  const noteImages = listImages.length ? listImages : blockImages;
 
   const title = typeof note.title === "string" ? note.title : extractQuotedField(noteBlock, "title");
   const desc = typeof note.desc === "string" ? note.desc : extractQuotedField(noteBlock, "desc");
@@ -2559,6 +2614,90 @@ function extractXiaohongshuNoteData(source, noteUrl) {
     tags,
     images: noteImages,
   };
+}
+
+function extractXiaohongshuNoteFromInitialState(source, noteId) {
+  const initialState = extractXiaohongshuInitialState(source);
+  if (!initialState || typeof initialState !== "object") {
+    return null;
+  }
+
+  const noteStore = initialState.note;
+  if (!noteStore || typeof noteStore !== "object") {
+    return null;
+  }
+
+  const targetId = noteId || noteStore.currentNoteId || noteStore.firstNoteId;
+  if (!targetId) {
+    return null;
+  }
+
+  const candidate =
+    noteStore.noteDetailMap?.[targetId]?.note ||
+    noteStore.noteDetailMap?.[String(targetId)]?.note ||
+    null;
+
+  return candidate && typeof candidate === "object" ? candidate : null;
+}
+
+function extractXiaohongshuInitialState(source) {
+  const marker = "window.__INITIAL_STATE__=";
+  const start = source.indexOf(marker);
+  if (start < 0) {
+    return null;
+  }
+
+  const begin = source.indexOf("{", start);
+  if (begin < 0) {
+    return null;
+  }
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let index = begin; index < source.length; index += 1) {
+    const char = source[index];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+
+    if (char === "{") {
+      depth += 1;
+      continue;
+    }
+
+    if (char === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        const jsonText = source.slice(begin, index + 1);
+        try {
+          return JSON.parse(jsonText);
+        } catch (error) {
+          try {
+            return vm.runInNewContext(`(${jsonText})`, {}, { timeout: 1000 });
+          } catch (vmError) {
+            return null;
+          }
+        }
+      }
+    }
+  }
+
+  return null;
 }
 
 function findXiaohongshuNotePayload(value, depth = 0) {
@@ -2603,28 +2742,34 @@ function extractXiaohongshuImagesFromImageList(imageList) {
   const images = [];
 
   for (const item of imageList) {
-    const itemCandidates = [
-      item?.originImageUrl,
-      item?.masterUrl,
-      item?.urlDefault,
-      item?.imageUrl,
-      item?.coverUrl,
-      item?.url,
-      item?.urlOrigin,
-      item?.urlPre,
-      item?.thumbnailUrl,
-    ]
-      .map((value) => normalizeXiaohongshuImageUrl(value))
-      .filter((value) => !isThumbnailLikeImageUrl(value))
-      .filter(Boolean);
-
-    const bestCandidate = pickBestImageCandidate(itemCandidates);
+    const bestCandidate = pickBestXiaohongshuImageVariant(item);
     if (bestCandidate && !images.includes(bestCandidate)) {
       images.push(bestCandidate);
     }
   }
 
   return images;
+}
+
+function pickBestXiaohongshuImageVariant(item) {
+  const infoList = Array.isArray(item?.infoList) ? item.infoList : [];
+  const itemCandidates = [
+    infoList.find((entry) => entry?.imageScene === "WB_DFT")?.url,
+    item?.urlDefault,
+    item?.originImageUrl,
+    item?.masterUrl,
+    item?.imageUrl,
+    item?.coverUrl,
+    item?.url,
+    item?.urlOrigin,
+    infoList.find((entry) => entry?.imageScene === "WB_PRV")?.url,
+    item?.urlPre,
+    item?.thumbnailUrl,
+  ]
+    .map((value) => normalizeXiaohongshuImageUrl(value))
+    .filter(Boolean);
+
+  return itemCandidates[0] || "";
 }
 
 function extractXiaohongshuImagesFromSource(source) {
@@ -3106,6 +3251,14 @@ function scoreImageCandidate(url, baseScore) {
 
   if (/(xhscdn\.com|sns-webpic)/i.test(lower)) {
     score += 18;
+  }
+
+  if (/!nd_dft_/i.test(lower) || /imageScene":"WB_DFT"/i.test(lower)) {
+    score += 24;
+  }
+
+  if (/!nd_prv_/i.test(lower) || /urlpre/i.test(lower)) {
+    score -= 18;
   }
 
   if (/(imageview2|w\/1080|w\/1242|w\/1440|format)/i.test(lower)) {
