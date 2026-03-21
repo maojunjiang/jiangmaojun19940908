@@ -447,17 +447,24 @@ function buildAiUserContentV2(result, imageUrls, options = {}) {
     lines.push("- rewrite_prompt 不是直接写成新笔记，而是输出给其他 AI 使用的最终生文 PROMPT 模板。");
     lines.push("- 不要出现图片分析、成图说明、镜头语言、画面风格等图片相关内容。");
     lines.push("- rewrite_prompt 必须整体包在一个 markdown 代码块里返回，前端只原样展示，不做额外排版。");
+    lines.push("- 被分析的原笔记只允许参考它的钩子写法、造句手法、语气、笔风、结构节奏和信息组织方式，不允许沿用其中的具体景点、人、物、店名、路线节点、美食名称、价格、时间等细节。");
+    lines.push(`- 最终生文模板必须直接使用固定地点变量 ${WORKFLOW_TEMPLATE_VARIABLES.locationContext}，不能改成别的字段名，不能写成具体城市名。`);
+    lines.push(`- 标题、正文、标签都必须围绕地点变量 ${WORKFLOW_TEMPLATE_VARIABLES.locationContext} 生成：标题要体现该地点/城市的核心吸引点，正文内容要根据该地点展开，标签也要包含该地点对应的城市/地区类关键词。`);
+    lines.push(`- 当地点变量 ${WORKFLOW_TEMPLATE_VARIABLES.locationContext} 的值变化时，标题、正文、标签内容也必须跟着变化；禁止在模板里写死“北京”“上海”“珠海”这类具体城市。`);
+    lines.push(`- 可以把地点变量 ${WORKFLOW_TEMPLATE_VARIABLES.locationContext} 直接写进标题模板、正文模板和标签模板中，作为生成时的唯一城市输入依据。`);
+    lines.push(`- 生成内容时要围绕地点变量 ${WORKFLOW_TEMPLATE_VARIABLES.locationContext} 对应城市主动补充该地的地标、景区、攻略、路线、打卡点、美食、交通、小贴士等本地内容模块，但这些内容必须来自当前地点本身，而不是来自被分析笔记里的原始细节。`);
+    lines.push(`- 允许模型主动联网搜索地点变量 ${WORKFLOW_TEMPLATE_VARIABLES.locationContext} 对应城市的最新景点、攻略、路线、美食和打卡信息，再按原笔记的表达方式重新组织成内容。`);
     lines.push("- 不要输出拆解过程、分析说明、bullet 解释或中间推理，只输出最终模板成品。");
     lines.push("- 最终模板必须结构化显示，每个模块单独成段，使用“模块名”+换行+“---”+换行+模块内容的形式。");
     lines.push("- 固定输出这些模块，顺序不能改：标题要求、开头钩子、正文结构、高频元素、结尾动作、标签策略、写作限制。");
     lines.push("- 每个模块都要直接写给其他 AI 的可执行要求，不要写“分析如下”“原文体现了”这类说明句。");
-    lines.push("- 标题要求要明确标题写法、字数建议、关键词组织方式。");
+    lines.push(`- 标题要求要明确标题写法、字数建议、关键词组织方式，并说明标题如何结合地点变量 ${WORKFLOW_TEMPLATE_VARIABLES.locationContext} 生成。`);
     lines.push("- 开头钩子要明确开场句式、情绪强度和进入主题的方式。");
-    lines.push("- 正文结构要明确内容分段逻辑、展开顺序和每段承担的作用。");
+    lines.push(`- 正文结构要明确内容分段逻辑、展开顺序和每段承担的作用，并说明正文如何根据地点变量 ${WORKFLOW_TEMPLATE_VARIABLES.locationContext} 自动生成该地的景区介绍、游玩攻略、路线安排、打卡建议、美食推荐和实用信息。`);
     lines.push("- 高频元素要明确数字、对比、口语感、标签词、列表感、情绪词等保留方式。");
     lines.push("- 结尾动作要明确如何收束，以及是否引导点赞、收藏、评论、关注或转发。");
-    lines.push("- 标签策略要明确标签数量、标签类型和标签承担的分发作用。");
-    lines.push("- 写作限制要明确哪些能模仿、哪些不能编造、哪些事实必须保持一致。");
+    lines.push(`- 标签策略要明确标签数量、标签类型和标签承担的分发作用，并要求标签中直接体现地点变量 ${WORKFLOW_TEMPLATE_VARIABLES.locationContext} 对应的目的地词。`);
+    lines.push("- 写作限制要明确哪些能模仿、哪些不能编造、哪些事实必须保持一致，并强调只能模仿写法，不能照搬原笔记里的具体细节。");
     lines.push("- 标签不能只罗列，必须说明标签在关键词覆盖、情绪强化、搜索分发或话题归类上的作用。");
     lines.push("- 不要输出泛化空话，不要把模板写成空泛行业方法论。");
     lines.push("- 如果原文没有某种元素，不要编造，只能如实说明缺失。");
@@ -468,6 +475,8 @@ function buildAiUserContentV2(result, imageUrls, options = {}) {
     lines.push("- 只输出 image_prompt，不要输出 rewrite_prompt。");
     lines.push("- image_prompt 直接写成可投喂豆包生图模型的最终成图提示词，不要写成模板说明文。");
     lines.push("- image_prompt 必须整体包在一个 markdown 代码块里返回，前端只原样展示，不做额外排版。");
+    lines.push("- 最终 image_prompt 全文必须使用简体中文输出，不允许夹带英文短语、英文摄影术语、英文风格词、英文参数描述或中英混写。");
+    lines.push("- 如果涉及摄影术语，也必须翻译成中文，例如用“中景”“平视机位”“浅景深”“背景虚化”“标准焦段”“胶片颗粒感”“低饱和”“柔和自然光”，不要写 Medium close-up、eye-level、bokeh、film grain、telephoto、soft light 这类英文。");
     lines.push("- 不要输出分析标题、拆解过程、bullet 解释、固定头部或固定尾部。");
     lines.push("- 每张参考图最终只输出 1 条可直接使用的 prompt。");
     lines.push("- 最终输出必须按“图一”“---”“prompt内容”“图二”“---”“prompt内容”这种结构展示，不要写成“图一最终Prompt：”。");
@@ -2190,7 +2199,11 @@ function formatImagePromptOutput(value) {
   }
 
   return ensureMarkdownCodeBlock(
-    canonicalizeWorkflowTemplateVariables(value.replace(/\r/g, "").trim())
+    ensureImagePromptLocationVariable(
+      localizeImagePromptText(
+        canonicalizeWorkflowTemplateVariables(value.replace(/\r/g, "").trim())
+      )
+    )
   );
 }
 
@@ -2222,6 +2235,93 @@ function canonicalizeWorkflowTemplateVariables(value) {
     (current, entry) => current.replace(entry.pattern, entry.replacement),
     value
   );
+}
+
+function localizeImagePromptText(value) {
+  if (typeof value !== "string" || !value.trim()) {
+    return "";
+  }
+
+  const replacements = [
+    [/\bMedium close-up\b/gi, "中景近距"],
+    [/\bclose-up\b/gi, "近景特写"],
+    [/\bmedium shot\b/gi, "中景"],
+    [/\bwide shot\b/gi, "远景"],
+    [/\beye-level\b/gi, "平视机位"],
+    [/\blow angle\b/gi, "低机位仰拍"],
+    [/\bhigh angle\b/gi, "高机位俯拍"],
+    [/\bshallow depth of field\b/gi, "浅景深"],
+    [/\bdepth of field\b/gi, "景深"],
+    [/\bbokeh\b/gi, "背景虚化光斑"],
+    [/\btelephoto lens\b/gi, "长焦镜头"],
+    [/\btelephoto\b/gi, "长焦感"],
+    [/\bstandard lens\b/gi, "标准焦段"],
+    [/\bsoft,?\s*diffused natural light\b/gi, "柔和漫射自然光"],
+    [/\bsoft natural light\b/gi, "柔和自然光"],
+    [/\bdiffused natural light\b/gi, "漫射自然光"],
+    [/\bfilm grain\b/gi, "胶片颗粒感"],
+    [/\bsoft focus\b/gi, "柔焦效果"],
+    [/\bunderexposed\b/gi, "轻微压暗曝光"],
+    [/\bdesaturated\b/gi, "低饱和"],
+    [/\bmuted color palette\b/gi, "低饱和柔和配色"],
+    [/\bwarm\b/gi, "暖调"],
+    [/\bcool\b/gi, "冷调"],
+    [/\bcentral focus\b/gi, "主体居中聚焦"],
+    [/\bphotorealistic\b/gi, "真实摄影感"],
+    [/\brealistic\b/gi, "真实自然"],
+    [/\bvintage feel\b/gi, "复古氛围"],
+    [/\bserene\b/gi, "宁静"],
+    [/\bnostalgic\b/gi, "怀旧"],
+    [/\bmelancholic\b/gi, "淡淡感伤"],
+  ];
+
+  return replacements.reduce(
+    (current, [pattern, replacement]) => current.replace(pattern, replacement),
+    value
+  );
+}
+
+function ensureImagePromptLocationVariable(value) {
+  if (typeof value !== "string" || !value.trim()) {
+    return "";
+  }
+
+  const locationVar = WORKFLOW_TEMPLATE_VARIABLES.locationContext;
+  if (value.includes(locationVar)) {
+    return value;
+  }
+
+  let next = value;
+
+  if (/\*\*生成目标：\*\*/.test(next)) {
+    next = next.replace(
+      /\*\*生成目标：\*\*\s*/g,
+      `**生成目标：** 请围绕固定地点变量 ${locationVar} 生成城市地标/景区系列图。`
+    );
+  }
+
+  if (/\*\*场景主体：\*\*/.test(next)) {
+    next = next.replace(
+      /\*\*场景主体：\*\*\s*/g,
+      `**场景主体：** 根据地点变量 ${locationVar} 动态替换为该城市的代表性地标、景区或城市名片场景。`
+    );
+  }
+
+  if (/\*\*城市映射：\*\*/.test(next)) {
+    next = next.replace(
+      /\*\*城市映射：\*\*\s*/g,
+      `**城市映射：** 读取地点变量 ${locationVar}，保持构图逻辑、镜头关系和氛围节奏不变，只替换为该地点对应的城市地标/景区。`
+    );
+  }
+
+  if (!/\*\*城市映射：\*\*/.test(next)) {
+    next = next.replace(
+      /(图[一二三四五六七八九十]+\s*\n---\s*)/g,
+      `$1**城市映射：** 读取地点变量 ${locationVar}，保持构图逻辑、镜头关系和氛围节奏不变，只替换为该地点对应的城市地标/景区。\n\n`
+    );
+  }
+
+  return next;
 }
 
 function truncateErrorText(value) {
