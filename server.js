@@ -53,7 +53,8 @@ const WORKFLOW_TEMPLATE_VARIABLES = Object.freeze({
   content: "{{ $('解析生成内容').item.json.content }}",
   imageList: "{{ $('输入参数汇总').item.json['图片信息'] }}",
   productImageList: "{{ $('文案提示词').item.json.image_url_list }}",
-  locationContext: "{{ $('输入参数汇总').item.json['用户输入'] }}",
+  locationContext: "{{ $('\u8f93\u5165\u53c2\u6570\u6c47\u603b').item.json['\u7528\u6237\u8f93\u5165'] }}",
+  imageLocationContext: "{{ $('\u8f93\u5165\u53c2\u6570\u6c47\u603b').item.json['\u56fe\u7247\u4fe1\u606f'] }}",
   firstImage: "{{ $('输入参数汇总').item.json['图片信息'][0] }}",
   logoHint: "{{ $('输入参数汇总').item.json['用户输入2'] }}",
   forbiddenLogo: "{{ $('输入参数汇总').item.json['用户输入3'] }}",
@@ -161,13 +162,44 @@ async function handlePromptGeneration(req, res) {
       rewriteInstruction,
       imageInstruction,
     });
-    writeJson(res, 200, prompts);
+    writeJson(res, 200, sanitizePromptResponseVariables(prompts));
   } catch (error) {
     writeJson(res, 502, {
       error: error instanceof Error ? error.message : "AI 提示词生成失败。",
       debugMessages: Array.isArray(error?.debugMessages) ? error.debugMessages : [],
     });
   }
+}
+
+function sanitizePromptResponseVariables(value) {
+  const rewriteVar = "{{ $('\\u8f93\\u5165\\u53c2\\u6570\\u6c47\\u603b').item.json['\\u7528\\u6237\\u8f93\\u5165'] }}";
+  const imageVar = "{{ $('\\u8f93\\u5165\\u53c2\\u6570\\u6c47\\u603b').item.json['\\u56fe\\u7247\\u4fe1\\u606f'] }}";
+
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizePromptResponseVariables(item));
+  }
+
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, entry]) => {
+      if (typeof entry === "string") {
+        if (key === "imagePrompt" || key === "image_prompt") {
+          return [key, entry.split(rewriteVar).join(imageVar)];
+        }
+
+        if (key === "rewritePrompt" || key === "rewrite_prompt") {
+          return [key, entry.split(imageVar).join(rewriteVar)];
+        }
+      }
+
+      return [key, sanitizePromptResponseVariables(entry)];
+    }));
+  }
+
+  if (typeof value === "string") {
+    return value;
+  }
+
+  return value;
 }
 
 async function handleImageProxy(requestUrl, res) {
@@ -487,7 +519,7 @@ function buildAiUserContentV2(result, imageUrls, options = {}) {
     lines.push("- prompt 重点保留参考图的画面质感、图片风格、构图镜头、光线色彩、摄影参数、情绪氛围。");
     lines.push("- 不要描述图里具体出现了什么物件、人物、建筑、道具、装饰或空间组件，也不要罗列前景、中景、背景元素。");
     lines.push("- 如果需要体现地点差异，必须写成“地点驱动的地域映射规则”，而不是写死某个城市。");
-    lines.push(`- 最终 prompt 必须能读取地点变量 ${WORKFLOW_TEMPLATE_VARIABLES.locationContext}：当地点是山东时映射为山东对应的地标/海岸/泉城/城市风貌，当地点是北京时映射为北京对应的地标/中轴线/胡同/城市天际线，但构图骨架、镜头关系和氛围逻辑仍保持与参考图一致。`);
+    lines.push(`- 最终 prompt 必须能读取地点变量 ${WORKFLOW_TEMPLATE_VARIABLES.imageLocationContext}：当地点是山东时映射为山东对应的地标/海岸/泉城/城市风貌，当地点是北京时映射为北京对应的地标/中轴线/胡同/城市天际线，但构图骨架、镜头关系和氛围逻辑仍保持与参考图一致。`);
     lines.push("- 地点映射要强调“同类替换”原则：替换的是地域标识符，不替换构图逻辑、光线逻辑、主体摆放逻辑和画面节奏。");
     lines.push("- 生成目标改为“城市地标/景区系列图”：主体必须随着城市变化，不再固定沿用参考图原主体。");
     lines.push("- 多张图之间必须体现“同城多个地标”规则：每张图生成同一城市的不同代表性地标、景区或城市名片场景，不能重复同一个主体。");
@@ -555,7 +587,7 @@ function buildDynamicImagePromptFixedPrefix(styleCount = IMAGE_PROMPT_REFERENCE_
     `- 生成图片数量：${safeCount} 张，${safeCount}种风格各生成1张`,
     `- 图片比例：${ratioText}`,
     "- 输出要求：每张图独立风格，不混合、不简化，统一视觉调性；**图片中不得出现任何文字、LOGO、标签、贴纸类元素**；**强化真实生活感，弱化AI合成感**",
-    `- 城市输入：优先读取地点变量“${vars.locationContext}”，将同一套构图骨架映射到该城市的多个代表性地标、景区或城市名片场景`,
+    `- 城市输入：优先读取地点变量“${vars.imageLocationContext}”，将同一套构图骨架映射到该城市的多个代表性地标、景区或城市名片场景`,
     `- 风格参考输入：解析图列表统一引用“${vars.imageList}”，只复用配图风格，不复用原图主体`,
     "- 主体生成规则：每张图都要生成当前城市的不同地标/景区主体，主体内容必须随城市变化，不得重复同一个地标",
   ];
@@ -681,7 +713,27 @@ function composeFixedImagePrompt(dynamicContent, result, instruction = "") {
   const dynamicSection =
     extractDynamicImagePromptSection(dynamicContent) ||
     buildDynamicImagePromptDynamicSectionSpecV2(styleCount, result);
-  return ensureMarkdownCodeBlock(dynamicSection);
+  return ensureMarkdownCodeBlock(sanitizeImagePromptContext(dynamicSection));
+}
+
+function sanitizeImagePromptContext(content) {
+  let output = String(content || "");
+
+  const replacements = [
+    [/\u6839\u636e\u5206\u6790\u56fe\d+\u52a8\u6001\u8bc6\u522b\u7684\u98ce\u683c/g, "\u771f\u5b9e\u751f\u6d3b\u65b9\u5f0f\u6444\u5f71\u98ce\u683c"],
+    [/\u6839\u636e\u5206\u6790\u56fe\d+\u7684\u4e3b\u4f53\u5e03\u5c40\u903b\u8f91\uff0c/g, ""],
+    [/\u6839\u636e\u5206\u6790\u56fe\d+\u660e\u786e/g, "\u660e\u786e"],
+    [/\u6839\u636e\u5206\u6790\u56fe\d+\u8865\u5145/g, "\u8865\u5145"],
+    [/\u4fdd\u6301\u56fe\d+\u7684/g, "\u4fdd\u6301\u5f53\u524d\u753b\u9762\u7684"],
+    [/\u6309\u5206\u6790\u56fe\u539f\u59cb\u6bd4\u4f8b/g, "\u6309\u539f\u59cb\u753b\u9762\u6bd4\u4f8b"],
+    [/\uff08\u4e0e\u5206\u6790\u56fe\u4e00\u81f4\uff09/g, "\uff08\u4fdd\u6301\u7edf\u4e00\u6bd4\u4f8b\uff09"],
+  ];
+
+  replacements.forEach(([pattern, value]) => {
+    output = output.replace(pattern, value);
+  });
+
+  return output;
 }
 
 function extractDynamicImagePromptSection(content) {
@@ -709,7 +761,7 @@ function ensureMarkdownCodeBlock(content) {
 function buildDynamicImageRatioSummary(analyses, safeCount) {
   const safeAnalyses = Array.isArray(analyses) ? analyses.filter(Boolean) : [];
   if (!safeAnalyses.length) {
-    return "按分析图原始比例输出";
+    return "\u6309\u539f\u59cb\u753b\u9762\u6bd4\u4f8b\u8f93\u51fa";
   }
 
   const labels = Array.from({ length: safeCount }, (_, index) => ({
@@ -719,18 +771,18 @@ function buildDynamicImageRatioSummary(analyses, safeCount) {
   const uniqueLabels = Array.from(new Set(labels.map((item) => item.label)));
 
   if (uniqueLabels.length === 1) {
-    return `${uniqueLabels[0]}（与分析图一致）`;
+    return `${uniqueLabels[0]}?\u4fdd\u6301\u7edf\u4e00\u6bd4\u4f8b?`;
   }
 
-  return `按分析图原始比例输出（${labels
-    .map((item) => `图${item.index + 1}${item.label}`)
-    .join("；")}）`;
+  return `\u6309\u539f\u59cb\u753b\u9762\u6bd4\u4f8b\u8f93\u51fa\uff08${labels
+    .map((item) => `\u56fe${item.index + 1}${item.label}`)
+    .join("\u3001")}\uff09`;
 }
 
 function inferDynamicImageRatioLabel(aspectRatio) {
   const numeric = Number(aspectRatio);
   if (!Number.isFinite(numeric) || numeric <= 0) {
-    return "按分析图原始比例";
+    return "\u6309\u539f\u59cb\u753b\u9762\u6bd4\u4f8b";
   }
 
   if (numeric <= 0.78) {
@@ -783,7 +835,7 @@ function inferDynamicImageStyleName(analysis, serial) {
     return "冷调纪实随拍风";
   }
 
-  return `根据分析图${serial}动态识别的风格`;
+  return "\u771f\u5b9e\u751f\u6d3b\u65b9\u5f0f\u6444\u5f71\u98ce\u683c";
 }
 
 function inferDynamicSceneType(analysis) {
@@ -826,38 +878,38 @@ function buildDynamicImageCoreElements(analysis, serial) {
 function buildDynamicImageSubjectLine(analysis, serial) {
   const prompt = String(analysis?.prompt || "").trim();
   if (prompt) {
-    return `根据图${serial}的主体布局逻辑，替换为目标城市的代表性地标或景区主体，并保持相同的主体占比、前后关系和视觉重心：${prompt}`;
+    return `\u66ff\u6362\u4e3a\u76ee\u6807\u57ce\u5e02\u7684\u4ee3\u8868\u6027\u5730\u6807\u6216\u666f\u533a\u4e3b\u4f53\uff0c\u5e76\u4fdd\u6301\u7a33\u5b9a\u7684\u4e3b\u4f53\u5360\u6bd4\u3001\u524d\u540e\u5173\u7cfb\u548c\u89c6\u89c9\u91cd\u5fc3\uff1a${prompt}`;
   }
 
-  return `根据分析图${serial}明确目标城市地标或景区主体的摆放方式、占画面比例、与环境的关系，以及是否有局部遮挡或前景压层`;
+  return "\u660e\u786e\u76ee\u6807\u57ce\u5e02\u5730\u6807\u6216\u666f\u533a\u4e3b\u4f53\u7684\u6446\u653e\u65b9\u5f0f\u3001\u5360\u753b\u9762\u6bd4\u4f8b\u3001\u4e0e\u73af\u5883\u7684\u5173\u7cfb\uff0c\u4ee5\u53ca\u5c40\u90e8\u906e\u6321\u6216\u524d\u666f\u538b\u5c42";
 }
 
 function buildDynamicImageCompositionLine(analysis, serial) {
   const composition = String(analysis?.composition || "").trim();
   const camera = String(analysis?.camera || "").trim();
   if (composition && camera) {
-    return `${composition}，${camera}`;
+    return `${composition}\uff0c${camera}`;
   }
 
   if (composition || camera) {
     return composition || camera;
   }
 
-  return `根据分析图${serial}补充景别、机位、视角、主体重心、留白与前后景关系`;
+  return "\u8865\u5145\u666f\u522b\u3001\u673a\u4f4d\u3001\u89c6\u89d2\u3001\u4e3b\u4f53\u91cd\u5fc3\u3001\u7559\u767d\u4e0e\u524d\u540e\u666f\u5173\u7cfb";
 }
 
 function buildDynamicImageLightColorLine(analysis, serial) {
   const light = String(analysis?.light || "").trim();
   const color = String(analysis?.color || "").trim();
   if (light && color) {
-    return `${light}，${color}`;
+    return `${light}\uff0c${color}`;
   }
 
   if (light || color) {
     return light || color;
   }
 
-  return `根据分析图${serial}补充主光方向、亮暗过渡、阴影关系、主色调和冷暖关系`;
+  return "\u8865\u5145\u4e3b\u5149\u65b9\u5411\u3001\u4eae\u6697\u8fc7\u6e21\u3001\u9634\u5f71\u5173\u7cfb\u3001\u4e3b\u8272\u8c03\u548c\u51b7\u6696\u5173\u7cfb";
 }
 
 function buildDynamicImageRealityLine(analysis, serial) {
@@ -866,7 +918,7 @@ function buildDynamicImageRealityLine(analysis, serial) {
     return details;
   }
 
-  return `根据分析图${serial}补充真实摄影痕迹，例如轻微噪点、景深、边缘虚实、反光、水汽、指纹、磨损、褶皱或环境使用痕迹`;
+  return "\u8865\u5145\u771f\u5b9e\u6444\u5f71\u75d5\u8ff9\uff0c\u4f8b\u5982\u8f7b\u5fae\u566a\u70b9\u3001\u666f\u6df1\u3001\u8fb9\u7f18\u865a\u5b9e\u3001\u53cd\u5149\u3001\u6c34\u6c7d\u3001\u6307\u7eb9\u3001\u78e8\u635f\u3001\u8936\u76b1\u6216\u73af\u5883\u4f7f\u7528\u75d5\u8ff9";
 }
 
 function buildDynamicImageTypographyLine(analysis, serial) {
@@ -875,27 +927,27 @@ function buildDynamicImageTypographyLine(analysis, serial) {
     return typography;
   }
 
-  return `根据分析图${serial}说明画面中文字、招牌、包装字样是否清晰可见、是否需要模糊化处理，以及哪些文字信息不能额外乱加`;
+  return "\u8bf4\u660e\u753b\u9762\u4e2d\u6587\u5b57\u3001\u62db\u724c\u3001\u5305\u88c5\u5b57\u6837\u662f\u5426\u6e05\u6670\u53ef\u89c1\u3001\u662f\u5426\u9700\u8981\u6a21\u7cca\u5316\u5904\u7406\uff0c\u4ee5\u53ca\u54ea\u4e9b\u6587\u5b57\u4fe1\u606f\u4e0d\u80fd\u989d\u5916\u4e71\u52a0";
 }
 
 function buildDynamicLocationMappingLine(serial) {
-  const locationVar = WORKFLOW_TEMPLATE_VARIABLES.locationContext;
-  return `城市主体映射：读取地点变量“${locationVar}”，保持图${serial}的构图、机位、空间层次和氛围逻辑不变，将主体和背景共同替换为该城市的代表性地标、景区或城市名片场景；多张图必须覆盖同城多个不同地标，不得重复同一个主体。`;
+  const locationVar = WORKFLOW_TEMPLATE_VARIABLES.imageLocationContext;
+  return `\u57ce\u5e02\u4e3b\u4f53\u6620\u5c04\uff1a\u8bfb\u53d6\u5730\u70b9\u53d8\u91cf\u201c${locationVar}\u201d\uff0c\u4fdd\u6301\u5f53\u524d\u753b\u9762\u7684\u6784\u56fe\u3001\u673a\u4f4d\u3001\u7a7a\u95f4\u5c42\u6b21\u548c\u6c1b\u56f4\u903b\u8f91\u4e0d\u53d8\uff0c\u5c06\u4e3b\u4f53\u548c\u80cc\u666f\u5171\u540c\u66ff\u6362\u4e3a\u8be5\u57ce\u5e02\u7684\u4ee3\u8868\u6027\u5730\u6807\u3001\u666f\u533a\u6216\u57ce\u5e02\u540d\u7247\u573a\u666f\uff1b\u591a\u5f20\u56fe\u5fc5\u987b\u8986\u76d6\u540c\u57ce\u591a\u4e2a\u4e0d\u540c\u5730\u6807\uff0c\u4e0d\u5f97\u91cd\u590d\u540c\u4e00\u4e2a\u4e3b\u4f53\u3002`;
 }
 
 function buildDynamicImagePromptCodeBlock(serial, styleName, ratioLabel, analysis, sceneType) {
   const composition = buildDynamicImageCompositionLine(analysis, serial);
   const lightColor = buildDynamicImageLightColorLine(analysis, serial);
-  const material = String(analysis?.material || `根据分析图${serial}补充真实摄影质感、表面纹理与颗粒层次`).trim();
-  const mood = String(analysis?.mood || `根据分析图${serial}补充真实生活方式氛围`).trim();
-  const params = String(analysis?.params || `根据分析图${serial}补充焦段感、景深、曝光倾向和清晰度控制`).trim();
+  const material = String(analysis?.material || "\u8865\u5145\u771f\u5b9e\u6444\u5f71\u8d28\u611f\u3001\u8868\u9762\u7eb9\u7406\u4e0e\u9897\u7c92\u5c42\u6b21").trim();
+  const mood = String(analysis?.mood || "\u8865\u5145\u771f\u5b9e\u751f\u6d3b\u65b9\u5f0f\u6c1b\u56f4").trim();
+  const params = String(analysis?.params || "\u8865\u5145\u7126\u6bb5\u611f\u3001\u666f\u6df1\u3001\u66dd\u5149\u503e\u5411\u548c\u6e05\u6670\u5ea6\u63a7\u5236").trim();
   const subjectLine = buildDynamicImageSubjectLine(analysis, serial);
   const locationMapping = buildDynamicLocationMappingLine(serial);
   const realismRule = "必须生成实景、实拍、自然的真实摄影画面，使用真实场景逻辑、自然光影、自然环境痕迹、轻微景深、真实噪点、真实反光、真实阴影和自然色彩过渡，严禁出现棚拍假感、CG渲染感或过度修图感。";
   const negativeRule = "禁止出现任何新增文字、LOGO、标签、贴纸、二维码、错误品牌信息、乱码、水印和无关装饰元素，同时避免AI感过强、塑料感、结构错误、边缘发虚、材质失真、过度锐化和画面假干净。";
 
   return [
-    `**生成目标：** 请生成一张${sceneType}的${styleName}城市地标场景图，主体由地点变量 ${WORKFLOW_TEMPLATE_VARIABLES.locationContext} 决定。`,
+    `**生成目标：** 请生成一张${sceneType}的${styleName}城市地标场景图，主体由地点变量 ${WORKFLOW_TEMPLATE_VARIABLES.imageLocationContext} 决定。`,
     `**场景主体：** ${subjectLine}。主体必须生成该城市的代表性地标、景区或城市名片场景，不再沿用参考图原主体；如果输出多张图，每张图都要是同城不同地标。`,
     `**城市映射：** ${locationMapping}`,
     `**构图与镜头：** ${composition}。`,
@@ -977,7 +1029,7 @@ async function generatePromptsWithAi(result, options = {}) {
 
       const parsed = parseAiResponsePayload(rawText);
       const content = extractAiMessageContent(parsed);
-      const promptJson = parseAiJsonContent(content);
+      const promptJson = parseAiJsonContent(content, target);
 
       return {
         rewritePrompt:
@@ -1005,7 +1057,7 @@ async function generatePromptsWithAi(result, options = {}) {
 
     const parsed = parseAiResponsePayload(rawText);
     const content = extractAiMessageContent(parsed);
-    const promptJson = parseAiJsonContent(content);
+    const promptJson = parseAiJsonContent(content, target);
 
     return {
       rewritePrompt:
@@ -1028,13 +1080,35 @@ async function generatePromptsWithGrobotai(result, options = {}) {
   const endpointUrl = buildGrobotaiPromptUrl();
   const imageUrls = collectAiImageUrls(result);
   const target = normalizePromptTarget(options.target);
-  const enrichedResult =
-    target !== "rewrite" && imageUrls.length
-      ? {
-          ...result,
-          imageAnalyses: await requestVisionAnalyses(endpointUrl, buildGrobotaiRequestHeaders(), imageUrls),
-        }
-      : result;
+  let enrichedResult = result;
+  const imageDebugMessages = [];
+
+  if (target !== "rewrite" && imageUrls.length) {
+    imageDebugMessages.push(`阶段 1/2：开始分析参考图，共 ${imageUrls.length} 张`);
+
+    try {
+      enrichedResult = {
+        ...result,
+        imageAnalyses: await requestVisionAnalyses(
+          endpointUrl,
+          buildGrobotaiRequestHeaders(),
+          imageUrls
+        ),
+      };
+      imageDebugMessages.push("阶段 1/2：参考图分析完成");
+    } catch (error) {
+      const visionError = new Error(
+        `图片分析失败：${error instanceof Error ? error.message : "未知错误"}`
+      );
+      visionError.debugMessages = [
+        ...imageDebugMessages,
+        `参考图接口：${endpointUrl}`,
+        `失败原因：${visionError.message}`,
+      ];
+      throw visionError;
+    }
+  }
+
   const payload = {
     messages: [
       {
@@ -1086,7 +1160,7 @@ async function generatePromptsWithGrobotai(result, options = {}) {
 
       const parsed = parseAiResponsePayload(rawText);
       const content = extractAiMessageContent(parsed);
-      const promptJson = parseAiJsonContent(content);
+      const promptJson = parseAiJsonContent(content, target);
 
       return {
         rewritePrompt:
@@ -1099,16 +1173,30 @@ async function generatePromptsWithGrobotai(result, options = {}) {
                   promptJson.image_prompt,
                   enrichedResult,
                   options.imageInstruction || options.imageDirection
-                )
+              )
               ),
-        debugMessages: target === "image" ? [] : payload.messages,
+        debugMessages:
+          target === "image"
+            ? [
+                ...imageDebugMessages,
+                "阶段 2/2：生图提示词生成完成",
+              ]
+            : payload.messages,
       };
     }
 
     throw lastError || new Error("AI prompt generation failed.");
   } catch (error) {
     if (error && typeof error === "object") {
-      error.debugMessages = target === "image" ? [] : payload.messages;
+      error.debugMessages =
+        target === "image"
+          ? [
+              ...imageDebugMessages,
+              "阶段 2/2：生图提示词生成失败",
+              `请求接口：${endpointUrl}`,
+              `失败原因：${error instanceof Error ? error.message : "未知错误"}`,
+            ]
+          : payload.messages;
     }
     throw error;
   } finally {
@@ -1710,7 +1798,7 @@ function buildSceneTransferDynamicStyleExample(index, theme, vars) {
     "",
     "✍️ 可复用 Prompt 模板（支持变量替换）",
     "```markdown",
-    `photorealistic lifestyle city-landmark scene based on the visual grammar of image ${serial}, keep the same composition logic and atmosphere, use location ${vars.locationContext} to generate a representative landmark or scenic spot of that city, and if generating multiple images ensure each image uses a different landmark from the same city, realistic texture, highly detailed, no unrelated stickers or text overlays, --ar 3:4 --style raw`,
+    `photorealistic lifestyle city-landmark scene based on the visual grammar of image ${serial}, keep the same composition logic and atmosphere, use location ${vars.imageLocationContext} to generate a representative landmark or scenic spot of that city, and if generating multiple images ensure each image uses a different landmark from the same city, realistic texture, highly detailed, no unrelated stickers or text overlays, --ar 3:4 --style raw`,
     "```",
   ].join("\n");
 }
@@ -2086,7 +2174,7 @@ function extractAiMessageContent(payload) {
   throw new Error("AI 返回内容为空。");
 }
 
-function parseAiJsonContent(content) {
+function parseAiJsonContent(content, target = "all") {
   const normalizePromptJson = (value) => {
     if (!value || typeof value !== "object") {
       return value;
@@ -2101,6 +2189,28 @@ function parseAiJsonContent(content) {
     }
 
     return value;
+  };
+
+  const fallbackPromptJson = (rawContent) => {
+    const explicitField = extractPromptFieldFallback(rawContent, target);
+    if (explicitField) {
+      return explicitField;
+    }
+
+    const text = extractPromptTextFallback(rawContent);
+    if (!text) {
+      return null;
+    }
+
+    if (target === "rewrite") {
+      return { rewrite_prompt: text };
+    }
+
+    if (target === "image") {
+      return { image_prompt: text };
+    }
+
+    return { rewrite_prompt: text, image_prompt: text };
   };
 
   if (content && typeof content === "object") {
@@ -2129,8 +2239,80 @@ function parseAiJsonContent(content) {
       }
     }
 
-    throw new Error("AI 返回内容不是合法 JSON。");
+    const fallback = fallbackPromptJson(content);
+    if (fallback) {
+      return normalizePromptJson(fallback);
+    }
+
+    throw new Error("AI ???????? JSON?");
   }
+}
+
+function extractPromptTextFallback(content) {
+  let text = String(content || "").trim();
+  if (!text) {
+    return "";
+  }
+
+  text = text
+    .replace(/^```(?:json|markdown|md|text)?\s*/i, "")
+    .replace(/\s*```$/, "")
+    .trim();
+
+  text = text
+    .replace(/^image[_\s-]?prompt[?:]\s*/i, "")
+    .replace(/^rewrite[_\s-]?prompt[?:]\s*/i, "")
+    .trim();
+
+  if (!text || text === "{}") {
+    return "";
+  }
+
+  return text;
+}
+
+function extractPromptFieldFallback(content, target = "all") {
+  const source = String(content || "")
+    .replace(/^```(?:json|markdown|md|text)?\s*/i, "")
+    .replace(/\s*```$/, "")
+    .trim();
+  if (!source) {
+    return null;
+  }
+
+  const extractField = (fieldName) => {
+    const pattern = new RegExp(`"${fieldName}"\\\\s*:\\\\s*"([\\\\s\\\\S]*?)"(?=\\\\s*,|\\\\s*})`, "i");
+    const match = source.match(pattern);
+    if (!match || typeof match[1] !== "string") {
+      return "";
+    }
+
+    try {
+      return JSON.parse(`"${match[1]}"`);
+    } catch (error) {
+      return match[1].replace(/\\"/g, '"').replace(/\\n/g, "\n").replace(/\\r/g, "\r");
+    }
+  };
+
+  const rewritePrompt = extractField("rewrite_prompt") || extractField("rewritten_prompt");
+  const imagePrompt = extractField("image_prompt") || extractField("imagePrompt");
+
+  if (target === "rewrite" && rewritePrompt) {
+    return { rewrite_prompt: rewritePrompt };
+  }
+
+  if (target === "image" && imagePrompt) {
+    return { image_prompt: imagePrompt };
+  }
+
+  if (rewritePrompt || imagePrompt) {
+    return {
+      rewrite_prompt: rewritePrompt,
+      image_prompt: imagePrompt,
+    };
+  }
+
+  return null;
 }
 
 function extractFirstJsonObject(value) {
@@ -2188,8 +2370,20 @@ function formatRewritePromptOutput(value) {
     return "";
   }
 
+  const extracted = extractPromptFieldFallback(value, "rewrite");
+  const normalizedValue =
+    extracted && typeof extracted.rewrite_prompt === "string" && extracted.rewrite_prompt.trim()
+      ? extracted.rewrite_prompt
+      : value;
+
   return ensureMarkdownCodeBlock(
-    canonicalizeWorkflowTemplateVariables(value.replace(/\r/g, "").trim())
+    normalizePromptLocationVariables(
+      replaceLegacyLocationVariable(
+        canonicalizeWorkflowTemplateVariables(normalizedValue.replace(/\r/g, "").trim()),
+        "rewrite"
+      ),
+      "rewrite"
+    )
   );
 }
 
@@ -2198,13 +2392,62 @@ function formatImagePromptOutput(value) {
     return "";
   }
 
+  const extracted = extractPromptFieldFallback(value, "image");
+  const normalizedValue =
+    extracted && typeof extracted.image_prompt === "string" && extracted.image_prompt.trim()
+      ? extracted.image_prompt
+      : value;
+
   return ensureMarkdownCodeBlock(
-    ensureImagePromptLocationVariable(
-      localizeImagePromptText(
-        canonicalizeWorkflowTemplateVariables(value.replace(/\r/g, "").trim())
-      )
+    normalizePromptLocationVariables(
+      ensureImagePromptLocationVariable(
+        localizeImagePromptText(
+          replaceLegacyLocationVariable(
+            canonicalizeWorkflowTemplateVariables(normalizedValue.replace(/\r/g, "").trim()),
+            "image"
+          )
+        )
+      ),
+      "image"
     )
   );
+}
+
+function normalizePromptLocationVariables(value, target = "rewrite") {
+  const replacement =
+    target === "image"
+      ? WORKFLOW_TEMPLATE_VARIABLES.imageLocationContext
+      : WORKFLOW_TEMPLATE_VARIABLES.locationContext;
+
+  const patterns = [
+    /\{\{\s*\$\('\?{2,}'\)\.item\.json\[['"]\?{2,}['"]\]\s*\}\}/g,
+    /\{\{\s*\$\('[^']*'\)\.item\.json\[['"]用户输入['"]\]\s*\}\}/g,
+    /\{\{\s*\$\('[^']*'\)\.item\.json\[['"]图片信息['"]\]\s*\}\}/g,
+    /\{\{\s*\$\('\\u8f93\\u5165\\u53c2\\u6570\\u6c47\\u603b'\)\.item\.json\[['"]\\u7528\\u6237\\u8f93\\u5165['"]\]\s*\}\}/g,
+    /\{\{\s*\$\('\\u8f93\\u5165\\u53c2\\u6570\\u6c47\\u603b'\)\.item\.json\[['"]\\u56fe\\u7247\\u4fe1\\u606f['"]\]\s*\}\}/g,
+  ];
+
+  return patterns.reduce(
+    (current, pattern) => String(current || "").replace(pattern, replacement),
+    String(value || "")
+  );
+}
+
+function replaceLegacyLocationVariable(value, target = "rewrite") {
+  const locationReplacement =
+    target === "image"
+      ? WORKFLOW_TEMPLATE_VARIABLES.imageLocationContext
+      : WORKFLOW_TEMPLATE_VARIABLES.locationContext;
+
+  return String(value || "")
+    .replace(
+      /\{\{\s*\$\('\u8f93\u5165\u53c2\u6570\u6c47\u603b'\)\.item\.json\[\["']\u7528\u6237\u8f93\u5165\["']\]\s*\}\}/g,
+      locationReplacement
+    )
+    .replace(
+      /\{\{\s*\$\('[^']*'\)\.item\.json\[\["']\u7528\u6237\u8f93\u5165\["']\]\s*\}\}/g,
+      locationReplacement
+    );
 }
 
 function canonicalizeWorkflowTemplateVariables(value) {
@@ -2231,9 +2474,14 @@ function canonicalizeWorkflowTemplateVariables(value) {
     },
   ];
 
-  return canonicalMap.reduce(
+  const normalized = canonicalMap.reduce(
     (current, entry) => current.replace(entry.pattern, entry.replacement),
     value
+  );
+
+  return normalized.replace(
+    /\{\{\s*\$\('\\u8f93\\u5165\\u53c2\\u6570\\u6c47\\u603b'\)\.item\.json\[['"]\\u7528\\u6237\\u8f93\\u5165['"]\]\s*\}\}/g,
+    WORKFLOW_TEMPLATE_VARIABLES.locationContext
   );
 }
 
@@ -2286,7 +2534,7 @@ function ensureImagePromptLocationVariable(value) {
     return "";
   }
 
-  const locationVar = WORKFLOW_TEMPLATE_VARIABLES.locationContext;
+  const locationVar = WORKFLOW_TEMPLATE_VARIABLES.imageLocationContext;
   if (value.includes(locationVar)) {
     return value;
   }

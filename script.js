@@ -43,7 +43,8 @@ const WORKFLOW_TEMPLATE_VARIABLES = Object.freeze({
   content: "{{ $('解析生成内容').item.json.content }}",
   imageList: "{{ $('输入参数汇总').item.json['图片信息'] }}",
   productImageList: "{{ $('文案提示词').item.json.image_url_list }}",
-  locationContext: "{{ $('输入参数汇总').item.json['用户输入'] }}",
+  locationContext: "{{ $('\u8f93\u5165\u53c2\u6570\u6c47\u603b').item.json['\u7528\u6237\u8f93\u5165'] }}",
+  imageLocationContext: "{{ $('\u8f93\u5165\u53c2\u6570\u6c47\u603b').item.json['\u56fe\u7247\u4fe1\u606f'] }}",
   firstImage: "{{ $('输入参数汇总').item.json['图片信息'][0] }}",
   logoHint: "{{ $('输入参数汇总').item.json['用户输入2'] }}",
   forbiddenLogo: "{{ $('输入参数汇总').item.json['用户输入3'] }}",
@@ -523,6 +524,17 @@ function formatDirectRewritePromptOutput(value) {
   return normalized;
 }
 
+function formatPromptErrorText(error, fallbackText = "") {
+  const message =
+    error instanceof Error ? error.message.trim() : String(error || "").trim();
+
+  if (message) {
+    return "Generation failed: " + message;
+  }
+
+  return fallbackText || getPromptNotGeneratedText();
+}
+
 async function hydratePromptOutputs(result, options = {}) {
   const rewriteRequestId = ++rewritePromptRequestSerial;
   const imageRequestId = ++imagePromptRequestSerial;
@@ -557,7 +569,7 @@ async function hydratePromptOutputs(result, options = {}) {
     }
   } catch (error) {
     if (rewriteRequestId === rewritePromptRequestSerial) {
-      resultPrompt.value = getPromptNotGeneratedText();
+      resultPrompt.value = formatPromptErrorText(error, getPromptNotGeneratedText());
       setPromptMessagesOutput(rewriteMessagesOutput, error?.debugMessages);
     }
   }
@@ -589,8 +601,8 @@ async function hydrateAiImagePrompt(result, requestId, direction = "") {
     if (requestId !== imagePromptRequestSerial) {
       return;
     }
-    resultImagePrompt.value = getPromptNotGeneratedText();
-    setPromptMessagesOutput(imageMessagesOutput, []);
+    resultImagePrompt.value = formatPromptErrorText(error, getPromptNotGeneratedText());
+    setPromptMessagesOutput(imageMessagesOutput, error?.debugMessages);
   }
 }
 
@@ -621,7 +633,7 @@ async function regenerateRewritePrompt() {
       return;
     }
 
-    resultPrompt.value = getPromptNotGeneratedText();
+    resultPrompt.value = formatPromptErrorText(error, getPromptNotGeneratedText());
   } finally {
     if (requestId === rewritePromptRequestSerial) {
       setRegenerateButtonState(regeneratePromptButton, true, "重新生成");
@@ -656,8 +668,8 @@ async function regenerateImagePrompt() {
       return;
     }
 
-    resultImagePrompt.value = getPromptNotGeneratedText();
-    setPromptMessagesOutput(imageMessagesOutput, []);
+    resultImagePrompt.value = formatPromptErrorText(error, getPromptNotGeneratedText());
+    setPromptMessagesOutput(imageMessagesOutput, error?.debugMessages);
   } finally {
     if (requestId === imagePromptRequestSerial) {
       setRegenerateButtonState(regenerateImagePromptButton, true, "重新生成");
