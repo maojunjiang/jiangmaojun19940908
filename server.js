@@ -505,34 +505,31 @@ function buildAiUserContentV2(result, imageUrls, options = {}) {
     lines.push("- 如果用户补充了新的偏好、口吻或强调点，可以直接融合到最终模板里，但不能篡改原笔记的事实和核心表达逻辑。");
   } else if (target === "image") {
     lines.push("- 只输出 image_prompt，不要输出 rewrite_prompt。");
-    lines.push("- image_prompt 直接写成可投喂豆包生图模型的最终成图提示词，不要写成模板说明文。");
+    lines.push("- image_prompt 只负责输出“视觉风格”这一段可直接复用的结构化内容，不要重复外层固定模板。");
     lines.push("- image_prompt 必须整体包在一个 markdown 代码块里返回，前端只原样展示，不做额外排版。");
     lines.push("- 最终 image_prompt 全文必须使用简体中文输出，不允许夹带英文短语、英文摄影术语、英文风格词、英文参数描述或中英混写。");
     lines.push("- 如果涉及摄影术语，也必须翻译成中文，例如用“中景”“平视机位”“浅景深”“背景虚化”“标准焦段”“胶片颗粒感”“低饱和”“柔和自然光”，不要写 Medium close-up、eye-level、bokeh、film grain、telephoto、soft light 这类英文。");
     lines.push("- 不要输出分析标题、拆解过程、bullet 解释、固定头部或固定尾部。");
     lines.push("- 每张参考图最终只输出 1 条可直接使用的 prompt。");
-    lines.push("- 最终输出必须按“图一”“---”“prompt内容”“图二”“---”“prompt内容”这种结构展示，不要写成“图一最终Prompt：”。");
-    lines.push("- 每个图块里的 prompt 内容也必须继续结构化分块展示，使用多个加粗小节标题，例如：**场景主体：**、**城市映射：**、**构图与镜头：**、**光线与色彩：**、**画面质感：**、**画面比例：**、**实景实拍要求：**、**负面限制：**。");
-    lines.push("- 每个加粗小节单独成段，不要把所有内容写成一整段长句。");
-    lines.push("- 以下骨架属于强约束，必须严格照抄标题与顺序，只替换每个标题下的内容，不能改标题名字，不能删减段落：");
-    lines.push("", buildStrictImagePromptOutputSkeleton(imageUrls.length || 1));
+    lines.push("- 输出内容会被系统自动填充到固定模板的“视觉风格”位置，所以这里只写视觉风格本身，不要重复“图生图生成指令”“基础素材”“输出要求”等固定文案。");
+    lines.push("- 视觉风格内容要尽量结构化，重点覆盖：构图关系、镜头景别与机位、光线与色彩、画面质感、氛围气质、实拍感要求。");
     lines.push("- prompt 重点保留参考图的画面质感、图片风格、构图镜头、光线色彩、摄影参数、情绪氛围。");
     lines.push("- 不要描述图里具体出现了什么物件、人物、建筑、道具、装饰或空间组件，也不要罗列前景、中景、背景元素。");
-    lines.push("- 如果需要体现地点差异，必须写成“地点驱动的地域映射规则”，而不是写死某个城市。");
-    lines.push(`- 最终 prompt 必须能读取地点变量 ${WORKFLOW_TEMPLATE_VARIABLES.imageLocationContext}：当地点是山东时映射为山东对应的地标/海岸/泉城/城市风貌，当地点是北京时映射为北京对应的地标/中轴线/胡同/城市天际线，但构图骨架、镜头关系和氛围逻辑仍保持与参考图一致。`);
-    lines.push("- 地点映射要强调“同类替换”原则：替换的是地域标识符，不替换构图逻辑、光线逻辑、主体摆放逻辑和画面节奏。");
-    lines.push("- 生成目标改为“城市地标/景区系列图”：主体必须随着城市变化，不再固定沿用参考图原主体。");
-    lines.push("- 多张图之间必须体现“同城多个地标”规则：每张图生成同一城市的不同代表性地标、景区或城市名片场景，不能重复同一个主体。");
-    lines.push("- 风格上严格参考笔记配图的视觉语法，例如构图、机位、色调、光线、质感和氛围；但主体/景区必须根据城市输入动态变化。");
+    lines.push("- 生图方向统一改为“本地生活内容视觉”，不再生成城市地标/景区宣传图。");
+    lines.push("- 多图内容方向要优先覆盖这三类本地生活表达：多店饮品 / 环境拼贴海报、高级感咖啡特调特写图、清新治愈 / 自驾松弛风格；具体哪一张对应哪一类，可按参考图的视觉气质做匹配。");
+    lines.push("- 如果需要体现地点差异，必须写成“地点驱动的本地生活映射规则”，而不是写死某个城市。");
+    lines.push(`- 最终 prompt 必须能读取地点变量 ${WORKFLOW_TEMPLATE_VARIABLES.imageLocationContext}：当地点变化时，自动映射为该地常见的本地生活线索，如街区商圈、咖啡馆聚集区、饮品门店氛围、可到达的轻出行路线、适合松弛停留的环境气质；但构图骨架、镜头关系和氛围逻辑仍保持与参考图一致。`);
+    lines.push("- 地点映射要强调“同类替换”原则：替换的是本地生活语境与地域氛围，不替换构图逻辑、光线逻辑、主体摆放逻辑和画面节奏。");
+    lines.push("- 多张图之间必须体现“同城本地生活组图”规则：可以分别生成多店饮品氛围、咖啡特调特写、松弛感出行或治愈系环境表达，但不要重复完全相同的画面任务。");
+    lines.push("- 风格上严格参考笔记配图的视觉语法，例如构图、机位、色调、光线、质感和氛围；但内容目标改为本地生活相关表达。");
     lines.push("- 完整成图提示词必须覆盖：视觉风格、画面质感、镜头景别、机位角度、光线来源、颜色关系、摄影参数、氛围关键词、负面限制。");
     lines.push("- 每张图的 prompt 必须严格围绕对应抓取图的视觉语言来写，不要落到具体元素、具体物件和具体场景细节。");
     lines.push("- 不要在图片分析和视觉提示词里写任何具体品牌名、具体 logo 名称、商标词或品牌故事，只保留可复用的通用视觉描述。");
     lines.push("- 必须把“真实拍摄”写进模板，而且这是硬性要求：生成结果必须是实景、实拍、自然画面，明确强调真实摄影、真实场景、自然光影、自然环境痕迹、轻微景深、真实噪点、真实反光和真实阴影。");
     lines.push("- 负面提示要明确排除：AI感过强、CG渲染感、塑料假面、错误结构、细节糊掉、边缘发虚、材质失真、过度锐化、过度磨皮、画面假干净。");
     lines.push("- 如果参考图信息很少，也要尽量把视觉风格依据写具体，不要退化成简单通用模板。");
-    lines.push("- 输出时每个风格块都只保留最终 prompt，不要解释你为什么这样写。");
-    lines.push("- 如果用户补充了新的画面要求、氛围要求或商业要求，可以直接融合到动态风格内容里，但不能破坏参考图对应关系和城市主体映射规则。");
-    lines.push("", "image_prompt 输出骨架：", buildDynamicImagePromptDynamicSectionSpecV2(imageUrls.length, result));
+    lines.push("- 输出时只保留可直接填入模板“视觉风格”区域的最终内容，不要解释你为什么这样写。");
+    lines.push("- 如果用户补充了新的画面要求、氛围要求或商业要求，可以直接融合到动态风格内容里，但不能破坏参考图对应关系和本地生活映射规则。");
   } else {
     lines.push("- rewrite_prompt 直接写成给其他 AI 使用的仿写提示词，不要写成新笔记。");
     lines.push("- image_prompt 直接写成给其他 AI 使用的成图提示词，不要写成图片说明。");
@@ -646,7 +643,14 @@ function buildDynamicImagePromptDynamicSectionSpecV2(styleCount = IMAGE_PROMPT_R
     const styleName = inferDynamicImageStyleName(analysis, serial);
     const ratioLabel = inferDynamicImageRatioLabel(analysis?.aspectRatio);
     const sceneType = inferDynamicSceneType(analysis);
-    const promptCode = buildDynamicImagePromptCodeBlock(serial, styleName, ratioLabel, analysis, sceneType);
+    const promptCode = buildDynamicImagePromptCodeBlock(
+      serial,
+      styleName,
+      ratioLabel,
+      analysis,
+      sceneType,
+      result
+    );
     return [
       `图${numberToChineseText(serial)}`,
       "---",
@@ -713,7 +717,82 @@ function composeFixedImagePrompt(dynamicContent, result, instruction = "") {
   const dynamicSection =
     extractDynamicImagePromptSection(dynamicContent) ||
     buildDynamicImagePromptDynamicSectionSpecV2(styleCount, result);
-  return ensureMarkdownCodeBlock(sanitizeImagePromptContext(dynamicSection));
+  return ensureMarkdownCodeBlock(
+    buildFixedImageGenerationTemplate(sanitizeImagePromptContext(dynamicSection), result)
+  );
+}
+
+function buildFixedImageGenerationTemplate(visualStyleContent, result = null) {
+  const normalizedVisualStyle = normalizeVisualStyleTemplateContent(visualStyleContent);
+
+  return [
+    "### 图生图生成指令",
+    "1. 核心参考依据：",
+    `   - 必须以参考图【${WORKFLOW_TEMPLATE_VARIABLES.imageList}】为唯一底图基础进行重构`,
+    "   - 强制保留参考图中：产品主体的物理形态/轮廓/核心特征、场景的核心空间布局/物体位置关系，不得篡改或替换产品主体、核心场景结构",
+    "2. 视觉重构要求：",
+    "   严格按照以下描述，对参考图进行风格、视觉效果的精准重构，且仅修改视觉维度（不改变产品/场景核心）：",
+    `   ${WORKFLOW_TEMPLATE_VARIABLES.content}`,
+    "3. 视觉风格",
+    normalizedVisualStyle,
+    "",
+    "4. 输出硬性标准：",
+    "   - 产品主体：100%保留原图形态，细节清晰度≥4K级别，无模糊/形变/缺失",
+    "   - 场景融合：参考图核心布局不变，风格/色调/光影/氛围与描述完全匹配，融合无割裂感",
+    "   - 画质要求：高清（分辨率≥1200×1600）、无噪点、无压缩失真",
+    "   - 格式要求：3:4竖图比例，数量1-5张",
+    "   - 约束优先级：参考图主体/布局保留 > 风格细节匹配 > 画质输出",
+  ].join("\n");
+}
+
+function normalizeVisualStyleTemplateContent(content) {
+  const normalized = String(content || "")
+    .replace(/\r/g, "")
+    .replace(/^```[\w-]*\n?/g, "")
+    .replace(/\n```$/g, "")
+    .trim();
+
+  if (!normalized) {
+    return [
+      "   ** 图一",
+      "   - 真实拍摄，强调真实摄影质感、自然光影层次、明确构图关系、统一色调氛围与清晰产品细节。",
+      "   - 负面限制：排除AI感过强、CG渲染感、塑料假面、错误结构、细节糊掉、边缘发虚、材质失真、过度锐化、过度磨皮、画面假干净。",
+    ].join("\n");
+  }
+
+  const lines = normalized
+    .split("\n")
+    .map((line) => line.replace(/\s+$/g, ""))
+    .filter(Boolean)
+    .map((line) => line.trim())
+    .map((line) => {
+      if (/^图[一二三四五六七八九十]/.test(line)) {
+        return `   ** ${line.replace(/^图/, "图")}`;
+      }
+
+      if (line === "---") {
+        return "";
+      }
+
+      if (/^\*\*\s*图[一二三四五六七八九十]/.test(line)) {
+        return `   ${line.replace(/\s+/g, " ").trim()}`;
+      }
+
+      const cleaned = line
+        .replace(/^\*\*([^*]+)\*\*[:：]?\s*/, "$1：")
+        .replace(/^[-*]\s*/, "");
+
+      return `   - ${cleaned}`;
+    })
+    .filter(Boolean);
+
+  return lines.length
+    ? lines.join("\n")
+    : [
+        "   ** 图一",
+        "   - 真实拍摄，强调真实摄影质感、自然光影层次、明确构图关系、统一色调氛围与清晰产品细节。",
+        "   - 负面限制：排除AI感过强、CG渲染感、塑料假面、错误结构、细节糊掉、边缘发虚、材质失真、过度锐化、过度磨皮、画面假干净。",
+      ].join("\n");
 }
 
 function sanitizeImagePromptContext(content) {
@@ -866,6 +945,111 @@ function inferDynamicSceneType(analysis) {
   return "真实生活方式场景";
 }
 
+function inferParsedNoteLifeCategory(result) {
+  const title = String(result?.title || "").trim();
+  const body = String(result?.body || "").trim();
+  const tags = Array.isArray(result?.tags)
+    ? result.tags.map((tag) => String(tag || "").trim()).filter(Boolean)
+    : [];
+  const combined = [title, body, tags.join(" ")].filter(Boolean).join(" ");
+
+  if (/(咖啡|拿铁|美式|澳白|手冲|特调|咖啡馆|咖啡店)/.test(combined)) {
+    return "coffee";
+  }
+
+  if (/(奶茶|果茶|茶饮|饮品|柠檬茶|奶盖|鲜果|多店|探店|门店)/.test(combined)) {
+    return "drink";
+  }
+
+  if (/(自驾|露营|周边游|公路|出逃|兜风|松弛|治愈|路线|出行)/.test(combined)) {
+    return "relax_trip";
+  }
+
+  if (/(环境|空间|店内|氛围|街区|商圈|打卡|合集|拼贴|海报)/.test(combined)) {
+    return "collage";
+  }
+
+  return "local_life";
+}
+
+function inferLocalLifeDirection(serial, analysis, result = null) {
+  const noteCategory = inferParsedNoteLifeCategory(result);
+  const combined = [
+    String(analysis?.style || "").trim(),
+    String(analysis?.background || "").trim(),
+    String(analysis?.mood || "").trim(),
+    String(analysis?.details || "").trim(),
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  if (noteCategory === "coffee") {
+    return {
+      label: "高级感咖啡特调特写图",
+      subjectHint: "围绕高级感咖啡或饮品特调做近景特写表达，强调液体层次、杯体质感、局部氛围和精致感",
+    };
+  }
+
+  if (noteCategory === "drink") {
+    return {
+      label: "多店饮品 / 环境拼贴海报",
+      subjectHint: "围绕同城多店饮品与门店环境信息做拼贴化海报表达，强调多空间切片、门店氛围切换和生活方式感",
+    };
+  }
+
+  if (noteCategory === "relax_trip") {
+    return {
+      label: "清新治愈 / 自驾松弛风格",
+      subjectHint: "围绕轻出行、松弛停留、清新治愈氛围做生活方式表达，强调路途感、停靠感和自然呼吸感",
+    };
+  }
+
+  if (noteCategory === "collage") {
+    return {
+      label: "多店饮品 / 环境拼贴海报",
+      subjectHint: "围绕同城门店环境与本地生活信息做拼贴化海报表达，强调多空间切片、氛围切换和城市生活感",
+    };
+  }
+
+  if (/拼贴|海报|门店|吧台|商圈|街区|店内/.test(combined)) {
+    return {
+      label: "多店饮品 / 环境拼贴海报",
+      subjectHint: "围绕同城多店饮品与门店环境信息做拼贴化海报表达，强调多空间切片、门店氛围切换和生活方式感",
+    };
+  }
+
+  if (/特写|桌面|静物|近景|细节|咖啡|饮品/.test(combined)) {
+    return {
+      label: "高级感咖啡特调特写图",
+      subjectHint: "围绕高级感咖啡或饮品特调做近景特写表达，强调液体层次、杯体质感、局部氛围和精致感",
+    };
+  }
+
+  if (/户外|自然|街景|窗景|公路|松弛|治愈|出行/.test(combined)) {
+    return {
+      label: "清新治愈 / 自驾松弛风格",
+      subjectHint: "围绕轻出行、松弛停留、清新治愈氛围做生活方式表达，强调路途感、停靠感和自然呼吸感",
+    };
+  }
+
+  const fallbackDirections = [
+    {
+      label: "多店饮品 / 环境拼贴海报",
+      subjectHint: "围绕同城多店饮品与门店环境信息做拼贴化海报表达，强调多空间切片、门店氛围切换和生活方式感",
+    },
+    {
+      label: "高级感咖啡特调特写图",
+      subjectHint: "围绕高级感咖啡或饮品特调做近景特写表达，强调液体层次、杯体质感、局部氛围和精致感",
+    },
+    {
+      label: "清新治愈 / 自驾松弛风格",
+      subjectHint: "围绕轻出行、松弛停留、清新治愈氛围做生活方式表达，强调路途感、停靠感和自然呼吸感",
+    },
+  ];
+
+  return fallbackDirections[(Math.max(1, serial) - 1) % fallbackDirections.length];
+}
+
 function buildDynamicImageCoreElements(analysis, serial) {
   const details = String(analysis?.details || "").trim();
   if (details) {
@@ -878,10 +1062,10 @@ function buildDynamicImageCoreElements(analysis, serial) {
 function buildDynamicImageSubjectLine(analysis, serial) {
   const prompt = String(analysis?.prompt || "").trim();
   if (prompt) {
-    return `\u66ff\u6362\u4e3a\u76ee\u6807\u57ce\u5e02\u7684\u4ee3\u8868\u6027\u5730\u6807\u6216\u666f\u533a\u4e3b\u4f53\uff0c\u5e76\u4fdd\u6301\u7a33\u5b9a\u7684\u4e3b\u4f53\u5360\u6bd4\u3001\u524d\u540e\u5173\u7cfb\u548c\u89c6\u89c9\u91cd\u5fc3\uff1a${prompt}`;
+    return `替换为目标地点下的本地生活主体关系，并保持稳定的主体占比、前后关系和视觉重心：${prompt}`;
   }
 
-  return "\u660e\u786e\u76ee\u6807\u57ce\u5e02\u5730\u6807\u6216\u666f\u533a\u4e3b\u4f53\u7684\u6446\u653e\u65b9\u5f0f\u3001\u5360\u753b\u9762\u6bd4\u4f8b\u3001\u4e0e\u73af\u5883\u7684\u5173\u7cfb\uff0c\u4ee5\u53ca\u5c40\u90e8\u906e\u6321\u6216\u524d\u666f\u538b\u5c42";
+  return "明确本地生活主体的摆放方式、占画面比例、与环境的关系，以及局部遮挡或前景压层，不写死具体物体名称";
 }
 
 function buildDynamicImageCompositionLine(analysis, serial) {
@@ -932,23 +1116,24 @@ function buildDynamicImageTypographyLine(analysis, serial) {
 
 function buildDynamicLocationMappingLine(serial) {
   const locationVar = WORKFLOW_TEMPLATE_VARIABLES.imageLocationContext;
-  return `\u57ce\u5e02\u4e3b\u4f53\u6620\u5c04\uff1a\u8bfb\u53d6\u5730\u70b9\u53d8\u91cf\u201c${locationVar}\u201d\uff0c\u4fdd\u6301\u5f53\u524d\u753b\u9762\u7684\u6784\u56fe\u3001\u673a\u4f4d\u3001\u7a7a\u95f4\u5c42\u6b21\u548c\u6c1b\u56f4\u903b\u8f91\u4e0d\u53d8\uff0c\u5c06\u4e3b\u4f53\u548c\u80cc\u666f\u5171\u540c\u66ff\u6362\u4e3a\u8be5\u57ce\u5e02\u7684\u4ee3\u8868\u6027\u5730\u6807\u3001\u666f\u533a\u6216\u57ce\u5e02\u540d\u7247\u573a\u666f\uff1b\u591a\u5f20\u56fe\u5fc5\u987b\u8986\u76d6\u540c\u57ce\u591a\u4e2a\u4e0d\u540c\u5730\u6807\uff0c\u4e0d\u5f97\u91cd\u590d\u540c\u4e00\u4e2a\u4e3b\u4f53\u3002`;
+  return `读取地点变量“${locationVar}”，保持当前画面的构图、机位、空间层次和氛围逻辑不变，将内容目标映射为该城市的本地生活语境，例如商圈街区、门店氛围、饮品消费场景、咖啡特调表达、周边轻出行和松弛停留方式；多张图需覆盖同城不同的本地生活切面，避免重复同一种表达。`;
 }
 
-function buildDynamicImagePromptCodeBlock(serial, styleName, ratioLabel, analysis, sceneType) {
+function buildDynamicImagePromptCodeBlock(serial, styleName, ratioLabel, analysis, sceneType, result = null) {
   const composition = buildDynamicImageCompositionLine(analysis, serial);
   const lightColor = buildDynamicImageLightColorLine(analysis, serial);
   const material = String(analysis?.material || "\u8865\u5145\u771f\u5b9e\u6444\u5f71\u8d28\u611f\u3001\u8868\u9762\u7eb9\u7406\u4e0e\u9897\u7c92\u5c42\u6b21").trim();
   const mood = String(analysis?.mood || "\u8865\u5145\u771f\u5b9e\u751f\u6d3b\u65b9\u5f0f\u6c1b\u56f4").trim();
   const params = String(analysis?.params || "\u8865\u5145\u7126\u6bb5\u611f\u3001\u666f\u6df1\u3001\u66dd\u5149\u503e\u5411\u548c\u6e05\u6670\u5ea6\u63a7\u5236").trim();
+  const direction = inferLocalLifeDirection(serial, analysis, result);
   const subjectLine = buildDynamicImageSubjectLine(analysis, serial);
   const locationMapping = buildDynamicLocationMappingLine(serial);
   const realismRule = "必须生成实景、实拍、自然的真实摄影画面，使用真实场景逻辑、自然光影、自然环境痕迹、轻微景深、真实噪点、真实反光、真实阴影和自然色彩过渡，严禁出现棚拍假感、CG渲染感或过度修图感。";
   const negativeRule = "禁止出现任何新增文字、LOGO、标签、贴纸、二维码、错误品牌信息、乱码、水印和无关装饰元素，同时避免AI感过强、塑料感、结构错误、边缘发虚、材质失真、过度锐化和画面假干净。";
 
   return [
-    `**生成目标：** 请生成一张${sceneType}的${styleName}城市地标场景图，主体由地点变量 ${WORKFLOW_TEMPLATE_VARIABLES.imageLocationContext} 决定。`,
-    `**场景主体：** ${subjectLine}。主体必须生成该城市的代表性地标、景区或城市名片场景，不再沿用参考图原主体；如果输出多张图，每张图都要是同城不同地标。`,
+    `**生成目标：** 请生成一张${sceneType}的${styleName}${direction.label}，主体方向由地点变量 ${WORKFLOW_TEMPLATE_VARIABLES.imageLocationContext} 决定。`,
+    `**场景主体：** ${direction.subjectHint}；${subjectLine}。不要复写参考图中的特定物体、品牌或具体场景细节，只保留可迁移的主体关系与视觉角色。`,
     `**城市映射：** ${locationMapping}`,
     `**构图与镜头：** ${composition}。`,
     `**光线与色彩：** ${lightColor}。`,
@@ -957,7 +1142,7 @@ function buildDynamicImagePromptCodeBlock(serial, styleName, ratioLabel, analysi
     `**整体氛围：** ${mood}。`,
     `**画面比例：** ${ratioLabel}。`,
     `**实景实拍要求：** ${realismRule}`,
-    `**补充要求：** 不要根据参考图去硬写具体元素描述，只复用其画面质感、风格语法、构图逻辑、光线关系和摄影感觉，由模型自行补充合理场景细节。`,
+    `**补充要求：** 不要根据参考图去硬写具体元素描述，只复用其画面质感、风格语法、构图逻辑、光线关系和摄影感觉；最终内容统一服务于本地生活表达，优先落在多店饮品 / 环境拼贴海报、高级感咖啡特调特写图、清新治愈 / 自驾松弛风格这三类方向。`,
     `**负面限制：** ${negativeRule}`,
   ].join("\n\n");
 }
@@ -1583,6 +1768,7 @@ function buildVisionAnalysisSystemPrompt() {
     "你是一个专业的摄影视觉分析助手。",
     "你的任务是逐张分析输入图片的视觉语言，并输出结构化 JSON。",
     "不要猜测品牌、地名、产品名或故事背景，只提炼画面本身可见的摄影与风格特征。",
+    "不要把分析重心放在某个具体物体上，只总结可迁移的构图关系、镜头语言、光线逻辑、色彩关系、材质表现和氛围气质。",
     "不要输出任何 JSON 之外的内容。",
   ].join("\n");
 }
@@ -1611,6 +1797,7 @@ function buildVisionAnalysisUserContent(imageUrls) {
         "10. mood：整体氛围和情绪感受。",
         "11. params：适合复现该画面语言的摄影参数建议，例如画幅比例、焦段感、景深、曝光倾向、清晰度倾向。",
         "不要描述具体品牌、具体 logo、具体产品名，也不要扩展成剧情说明。",
+        "如果画面里存在明显主体，也只把它抽象成主体类型和视觉角色，不要围绕特定物体做细节复述。",
       ].join("\n"),
     },
     ...imageUrls.map((imageUrl) => ({
