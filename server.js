@@ -513,6 +513,8 @@ function buildAiUserContentV2(result, imageUrls, options = {}) {
     lines.push("- 每张参考图最终只输出 1 条可直接使用的 prompt。");
     lines.push("- 输出内容会被系统自动填充到固定模板的“视觉风格”位置，所以这里只写视觉风格本身，不要重复“图生图生成指令”“基础素材”“输出要求”等固定文案。");
     lines.push("- 视觉风格内容要尽量结构化，重点覆盖：构图关系、镜头景别与机位、光线与色彩、画面质感、氛围气质、实拍感要求。");
+    lines.push("- 如果用户在“和生图 AI 直接对话”里输入了补充要求，必须把这段内容自然融合进“视觉风格”主描述里，而不是单独列一条说明。");
+    lines.push("- 允许依据这段直接对话内容，结合参考图/产品图/场景图自行补充合理的画面元素、环境细节、氛围细节和镜头细节，但不能破坏参考图主体与核心布局保留规则。");
     lines.push("- prompt 重点保留参考图的画面质感、图片风格、构图镜头、光线色彩、摄影参数、情绪氛围。");
     lines.push("- 不要描述图里具体出现了什么物件、人物、建筑、道具、装饰或空间组件，也不要罗列前景、中景、背景元素。");
     lines.push("- 生图方向统一改为“本地生活内容视觉”，不再生成城市地标/景区宣传图。");
@@ -718,18 +720,23 @@ function composeFixedImagePrompt(dynamicContent, result, instruction = "") {
     extractDynamicImagePromptSection(dynamicContent) ||
     buildDynamicImagePromptDynamicSectionSpecV2(styleCount, result);
   return ensureMarkdownCodeBlock(
-    buildFixedImageGenerationTemplate(sanitizeImagePromptContext(dynamicSection), result)
+    buildFixedImageGenerationTemplate(
+      sanitizeImagePromptContext(dynamicSection),
+      result,
+      instruction
+    )
   );
 }
 
-function buildFixedImageGenerationTemplate(visualStyleContent, result = null) {
-  const normalizedVisualStyle = normalizeVisualStyleTemplateContent(visualStyleContent);
+function buildFixedImageGenerationTemplate(visualStyleContent, result = null, instruction = "") {
+  const normalizedVisualStyle = normalizeVisualStyleTemplateContent(visualStyleContent, instruction);
 
   return [
     "### 图生图生成指令",
     "1. 核心参考依据：",
     `   - 必须以参考图【${WORKFLOW_TEMPLATE_VARIABLES.imageList}】为唯一底图基础进行重构`,
     "   - 强制保留参考图中：产品主体的物理形态/轮廓/核心特征、场景的核心空间布局/物体位置关系，不得篡改或替换产品主体、核心场景结构",
+    "   - 文案变量：画面中出现店铺名/产品名字/地名，严格使用{{ $('输入参数汇总').item.json['用户输入'] }}替换",
     "2. 视觉重构要求：",
     "   严格按照以下描述，对参考图进行风格、视觉效果的精准重构，且仅修改视觉维度（不改变产品/场景核心）：",
     `   ${WORKFLOW_TEMPLATE_VARIABLES.content}`,
@@ -738,6 +745,8 @@ function buildFixedImageGenerationTemplate(visualStyleContent, result = null) {
     "",
     "4. 输出硬性标准：",
     "   - 产品主体：100%保留原图形态，细节清晰度≥4K级别，无模糊/形变/缺失",
+    "   - 主物体尺寸：按照画面调整大小，符合实际物理大小",
+    "   - 文案变量：画面中出现店铺名/产品名字/地名，严格使用{{ $('输入参数汇总').item.json['用户输入'] }}替换",
     "   - 场景融合：参考图核心布局不变，风格/色调/光影/氛围与描述完全匹配，融合无割裂感",
     "   - 画质要求：高清（分辨率≥1200×1600）、无噪点、无压缩失真",
     "   - 格式要求：3:4竖图比例，数量1-5张",
@@ -745,19 +754,26 @@ function buildFixedImageGenerationTemplate(visualStyleContent, result = null) {
   ].join("\n");
 }
 
-function normalizeVisualStyleTemplateContent(content) {
+function normalizeVisualStyleTemplateContent(content, instruction = "") {
   const normalized = String(content || "")
     .replace(/\r/g, "")
     .replace(/^```[\w-]*\n?/g, "")
     .replace(/\n```$/g, "")
     .trim();
+  const normalizedInstruction = String(instruction || "").trim();
 
   if (!normalized) {
-    return [
+    const fallbackLines = [
       "   ** 图一",
       "   - 真实拍摄，强调真实摄影质感、自然光影层次、明确构图关系、统一色调氛围与清晰产品细节。",
       "   - 负面限制：排除AI感过强、CG渲染感、塑料假面、错误结构、细节糊掉、边缘发虚、材质失真、过度锐化、过度磨皮、画面假干净。",
-    ].join("\n");
+    ];
+
+    if (normalizedInstruction) {
+      fallbackLines[1] = mergeInstructionIntoVisualLine(fallbackLines[1], normalizedInstruction);
+    }
+
+    return fallbackLines.join("\n");
   }
 
   const lines = normalized
@@ -786,13 +802,50 @@ function normalizeVisualStyleTemplateContent(content) {
     })
     .filter(Boolean);
 
+  if (normalizedInstruction) {
+    const targetIndex = lines.findIndex(
+      (line) => /^\s*-\s*/.test(line) && !/负面限制[:：]/.test(line)
+    );
+
+    if (targetIndex >= 0) {
+      lines[targetIndex] = mergeInstructionIntoVisualLine(lines[targetIndex], normalizedInstruction);
+    } else {
+      lines.unshift("   ** 图一");
+      lines.splice(
+        1,
+        0,
+        mergeInstructionIntoVisualLine(
+          "   - 真实拍摄，强调真实摄影质感、自然光影层次、明确构图关系、统一色调氛围与清晰产品细节。",
+          normalizedInstruction
+        )
+      );
+    }
+  }
+
   return lines.length
     ? lines.join("\n")
     : [
         "   ** 图一",
-        "   - 真实拍摄，强调真实摄影质感、自然光影层次、明确构图关系、统一色调氛围与清晰产品细节。",
+        normalizedInstruction
+          ? mergeInstructionIntoVisualLine(
+              "   - 真实拍摄，强调真实摄影质感、自然光影层次、明确构图关系、统一色调氛围与清晰产品细节。",
+              normalizedInstruction
+            )
+          : "   - 真实拍摄，强调真实摄影质感、自然光影层次、明确构图关系、统一色调氛围与清晰产品细节。",
         "   - 负面限制：排除AI感过强、CG渲染感、塑料假面、错误结构、细节糊掉、边缘发虚、材质失真、过度锐化、过度磨皮、画面假干净。",
       ].join("\n");
+}
+
+function mergeInstructionIntoVisualLine(line, instruction) {
+  const baseLine = String(line || "").trim();
+  const normalizedInstruction = String(instruction || "").trim();
+
+  if (!normalizedInstruction) {
+    return baseLine;
+  }
+
+  const content = baseLine.replace(/^\s*-\s*/, "");
+  return `   - ${content}，融合“${normalizedInstruction}”的画面意图，并结合参考图/产品图/场景图自行补充合理画面细节。`;
 }
 
 function sanitizeImagePromptContext(content) {
@@ -2586,18 +2639,33 @@ function formatImagePromptOutput(value) {
       : value;
 
   return ensureMarkdownCodeBlock(
-    normalizePromptLocationVariables(
-      ensureImagePromptLocationVariable(
-        localizeImagePromptText(
-          replaceLegacyLocationVariable(
-            canonicalizeWorkflowTemplateVariables(normalizedValue.replace(/\r/g, "").trim()),
-            "image"
+    restoreFixedTemplateUserInputVariable(
+      normalizePromptLocationVariables(
+        ensureImagePromptLocationVariable(
+          localizeImagePromptText(
+            replaceLegacyLocationVariable(
+              canonicalizeWorkflowTemplateVariables(normalizedValue.replace(/\r/g, "").trim()),
+              "image"
+            )
           )
-        )
-      ),
-      "image"
+        ),
+        "image"
+      )
     )
   );
+}
+
+function restoreFixedTemplateUserInputVariable(value) {
+  const source = String(value || "");
+  return source
+    .replace(
+      /文案变量：画面中出现店铺名\/产品名字\/地名，严格使用\{\{\s*\$\('输入参数汇总'\)\.item\.json\['图片信息'\]\s*\}\}替换/g,
+      "文案变量：画面中出现店铺名/产品名字/地名，严格使用{{ $('输入参数汇总').item.json['用户输入'] }}替换"
+    )
+    .replace(
+      /文案变量：如果画面中有出现产品名字\/地名，直接用 json 变量的内容[“"]\{\{\s*\$\('输入参数汇总'\)\.item\.json\['图片信息'\]\s*\}\}[”"]?/g,
+      "文案变量：画面中出现店铺名/产品名字/地名，严格使用{{ $('输入参数汇总').item.json['用户输入'] }}替换"
+    );
 }
 
 function normalizePromptLocationVariables(value, target = "rewrite") {
