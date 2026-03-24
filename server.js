@@ -30,6 +30,17 @@ const AI_VISION_TIMEOUT_MS = Number.parseInt(
   process.env.AI_VISION_TIMEOUT_MS || String(Math.max(AI_IMAGE_REQUEST_TIMEOUT_MS, 180000)),
   10
 );
+const AI_PROMPT_SELF_CHECK_ENABLED = !/^(0|false|off)$/i.test(
+  String(process.env.AI_PROMPT_SELF_CHECK || "").trim()
+);
+const AI_PROMPT_SELF_CHECK_ROUNDS = normalizePositiveInteger(
+  process.env.AI_PROMPT_SELF_CHECK_ROUNDS,
+  3
+);
+const AI_PROMPT_SELF_CHECK_MIN_SCORE = normalizePositiveInteger(
+  process.env.AI_PROMPT_SELF_CHECK_MIN_SCORE,
+  82
+);
 
 const MIME_TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -71,6 +82,11 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === "POST" && requestUrl.pathname === "/api/prompts") {
       await handlePromptGeneration(req, res);
+      return;
+    }
+
+    if (req.method === "POST" && requestUrl.pathname === "/api/selftest") {
+      await handlePromptSelfTest(req, res);
       return;
     }
 
@@ -161,12 +177,55 @@ async function handlePromptGeneration(req, res) {
       target,
       rewriteInstruction,
       imageInstruction,
+      selfTest: body?.selfTest,
     });
     writeJson(res, 200, sanitizePromptResponseVariables(prompts));
   } catch (error) {
     writeJson(res, 502, {
       error: error instanceof Error ? error.message : "AI 提示词生成失败。",
       debugMessages: Array.isArray(error?.debugMessages) ? error.debugMessages : [],
+    });
+  }
+}
+
+async function handlePromptSelfTest(req, res) {
+  const body = await readJsonBody(req);
+  const result = body?.result;
+  const rewritePrompt = typeof body?.rewritePrompt === "string" ? body.rewritePrompt.trim() : "";
+  const imagePrompt = typeof body?.imagePrompt === "string" ? body.imagePrompt.trim() : "";
+  const selfTest = normalizeSelfTestContext(body?.selfTest);
+
+  if (!result || typeof result !== "object") {
+    writeJson(res, 400, { error: "缺少 result 参数。" });
+    return;
+  }
+
+  if (!rewritePrompt || !imagePrompt) {
+    writeJson(res, 400, { error: "缺少 prompt 模板，请先生成仿写和生图 prompt。" });
+    return;
+  }
+
+  const generated = {
+    rewritePrompt,
+    imagePrompt,
+    debugMessages: [],
+  };
+
+  try {
+    const review = isAiPromptConfigured()
+      ? await reviewGeneratedPrompts(AI_PROVIDER, result, { target: "all" }, generated, selfTest)
+      : buildFallbackPromptReview("all", generated, result, { target: "all" }, selfTest);
+
+    writeJson(res, 200, {
+      qualityReview: review,
+    });
+  } catch (error) {
+    const review = buildFallbackPromptReview("all", generated, result, { target: "all" }, selfTest);
+    writeJson(res, 200, {
+      qualityReview: review,
+      debugMessages: [
+        `自测回退到本地规则：${error instanceof Error ? error.message : "未知错误"}`,
+      ],
     });
   }
 }
@@ -1201,7 +1260,15 @@ function buildDynamicImagePromptCodeBlock(serial, styleName, ratioLabel, analysi
 }
 async function generatePromptsWithAi(result, options = {}) {
   if (AI_PROVIDER === "grobotai") {
-    return generatePromptsWithGrobotai(result, options);
+    return generatePromptsWithQualityGate("grobotai", result, options, generatePromptsWithGrobotaiCore);
+  }
+
+  return generatePromptsWithQualityGate("ai", result, options, generatePromptsWithAiCore);
+}
+
+async function generatePromptsWithAiCore(result, options = {}) {
+  if (AI_PROVIDER === "grobotai") {
+    return generatePromptsWithGrobotaiCore(result, options);
   }
 
   const endpointUrl = buildAiEndpointUrl();
@@ -1314,7 +1381,7 @@ async function generatePromptsWithAi(result, options = {}) {
   }
 }
 
-async function generatePromptsWithGrobotai(result, options = {}) {
+async function generatePromptsWithGrobotaiCore(result, options = {}) {
   const endpointUrl = buildGrobotaiPromptUrl();
   const imageUrls = collectAiImageUrls(result);
   const target = normalizePromptTarget(options.target);
@@ -1440,6 +1507,600 @@ async function generatePromptsWithGrobotai(result, options = {}) {
   } finally {
     clearTimeout(timeoutId);
   }
+}
+
+async function generatePromptsWithQualityGate(providerName, result, options, requestOnce) {
+  const target = normalizePromptTarget(options.target);
+  const maxRounds = Math.max(1, AI_PROMPT_SELF_CHECK_ROUNDS);
+  const shouldCheckQuality = AI_PROMPT_SELF_CHECK_ENABLED && maxRounds > 0;
+  const selfTest = normalizeSelfTestContext(options.selfTest);
+  let currentOptions = { ...options };
+
+  if (!shouldCheckQuality) {
+    return requestOnce(result, currentOptions);
+  }
+
+  for (let attempt = 1; attempt <= maxRounds; attempt += 1) {
+    const generated = await requestOnce(result, currentOptions);
+    const review = shouldCheckQuality
+      ? await reviewGeneratedPrompts(providerName, result, currentOptions, generated, selfTest)
+      : buildFallbackPromptReview(target, generated, result, currentOptions, selfTest);
+    const mergedMessages = [
+      ...ensureDebugMessageArray(generated.debugMessages),
+      ...buildPromptSelfCheckDebugMessages(attempt, maxRounds, review, target),
+    ];
+
+    if (review.pass) {
+      return {
+        ...generated,
+        qualityReview: review,
+        debugMessages: mergedMessages,
+      };
+    }
+
+    if (attempt >= maxRounds) {
+      const error = new Error(buildPromptQualityFailureMessage(review, target, providerName));
+      error.debugMessages = mergedMessages;
+      error.qualityReview = review;
+      throw error;
+    }
+
+    currentOptions = buildPromptRetryOptions(currentOptions, review, target);
+  }
+}
+
+function buildPromptRetryOptions(options, review, target) {
+  const nextOptions = { ...options };
+  const rewriteFeedback = extractPromptReviewFeedback(review, "rewrite");
+  const imageFeedback = extractPromptReviewFeedback(review, "image");
+
+  if (target !== "image" && rewriteFeedback) {
+    nextOptions.rewriteInstruction = mergePromptInstructions(
+      options.rewriteInstruction || options.rewriteDirection || "",
+      rewriteFeedback
+    );
+  }
+
+  if (target !== "rewrite" && imageFeedback) {
+    nextOptions.imageInstruction = mergePromptInstructions(
+      options.imageInstruction || options.imageDirection || "",
+      imageFeedback
+    );
+  }
+
+  return nextOptions;
+}
+
+function mergePromptInstructions(baseInstruction, extraInstruction) {
+  const base = String(baseInstruction || "").trim();
+  const extra = String(extraInstruction || "").trim();
+
+  if (!base) {
+    return extra;
+  }
+
+  if (!extra) {
+    return base;
+  }
+
+  if (base.includes(extra)) {
+    return base;
+  }
+
+  return `${base}\n\n【自检修正】${extra}`;
+}
+
+function buildPromptSelfCheckDebugMessages(attempt, maxRounds, review, target) {
+  const messages = [`自检轮次 ${attempt}/${maxRounds}`];
+
+  if (target === "all") {
+    messages.push(
+      `rewrite_prompt: ${formatPromptReviewScore(review?.rewrite)}`,
+      `image_prompt: ${formatPromptReviewScore(review?.image)}`
+    );
+  } else {
+    messages.push(`prompt: ${formatPromptReviewScore(review)}`);
+  }
+
+  if (review?.summary) {
+    messages.push(`判卷摘要：${review.summary}`);
+  }
+
+  return messages;
+}
+
+function formatPromptReviewScore(review) {
+  if (!review || typeof review !== "object") {
+    return "未评分";
+  }
+
+  const score = Number(review.score);
+  const scoreText = Number.isFinite(score) ? `${Math.round(score)}/100` : "未评分";
+  const statusText = review.pass ? "通过" : "未通过";
+  return `${statusText}，${scoreText}`;
+}
+
+function buildPromptQualityFailureMessage(review, target, providerName) {
+  const label = providerName === "grobotai" ? "GrobotAI" : "AI";
+  const failureText = target === "all"
+    ? `${formatPromptReviewScore(review?.rewrite)}；${formatPromptReviewScore(review?.image)}`
+    : formatPromptReviewScore(review);
+
+  return `${label} 提示词质量未达标，已重试到上限：${failureText}`;
+}
+
+function extractPromptReviewFeedback(review, target) {
+  if (!review || typeof review !== "object") {
+    return "";
+  }
+
+  if (target === "rewrite" && review.rewrite && typeof review.rewrite === "object") {
+    return buildPromptReviewFeedback(review.rewrite, "rewrite");
+  }
+
+  if (target === "image" && review.image && typeof review.image === "object") {
+    return buildPromptReviewFeedback(review.image, "image");
+  }
+
+  if (target === "rewrite" || target === "image") {
+    return buildPromptReviewFeedback(review, target);
+  }
+
+  return "";
+}
+
+function buildPromptReviewFeedback(review, target) {
+  const issues = Array.isArray(review.issues)
+    ? review.issues.map((item) => String(item || "").trim()).filter(Boolean)
+    : [];
+  const misses = Array.isArray(review.missing_points)
+    ? review.missing_points.map((item) => String(item || "").trim()).filter(Boolean)
+    : [];
+  const notes = [];
+
+  if (issues.length) {
+    notes.push(`优先修正：${issues.join("；")}`);
+  }
+
+  if (misses.length) {
+    notes.push(`补充缺失：${misses.join("；")}`);
+  }
+
+  const rewriteInstruction = String(review.rewrite_instruction || review.rewriteInstruction || "").trim();
+  if (rewriteInstruction) {
+    notes.push(rewriteInstruction);
+  }
+
+  if (!notes.length) {
+    const score = Number(review.score);
+    const scoreText = Number.isFinite(score) ? Math.round(score) : "较低";
+    notes.push(
+      target === "rewrite"
+        ? `请提高仿写提示词的结构完整度、原笔记风格贴合度和可执行性，当前评分 ${scoreText}。`
+        : `请提高生图提示词的真实实拍感、视觉一致性和可直接投喂性，当前评分 ${scoreText}。`
+    );
+  }
+
+  return notes.join(" ");
+}
+
+function ensureDebugMessageArray(value) {
+  return Array.isArray(value) ? value.filter((item) => typeof item === "string" && item.trim()) : [];
+}
+
+function normalizeSelfTestContext(value) {
+  return {
+    location: String(value?.location || "").trim(),
+    imageInfo: String(value?.imageInfo || "").trim(),
+    imageDataUrls: Array.isArray(value?.imageDataUrls)
+      ? value.imageDataUrls.map((item) => String(item || "").trim()).filter(Boolean)
+      : [],
+  };
+}
+
+function buildFallbackPromptReview(target, generated, result, options) {
+  const rewriteText = unwrapMarkdownCodeBlock(generated?.rewritePrompt || "");
+  const imageText = unwrapMarkdownCodeBlock(generated?.imagePrompt || "");
+
+  if (target === "rewrite") {
+    return assessPromptTextQuality("rewrite", rewriteText, result, options);
+  }
+
+  if (target === "image") {
+    return assessPromptTextQuality("image", imageText, result, options);
+  }
+
+  const rewrite = assessPromptTextQuality("rewrite", rewriteText, result, options);
+  const image = assessPromptTextQuality("image", imageText, result, options);
+  return {
+    pass: Boolean(rewrite.pass && image.pass),
+    rewrite,
+    image,
+    summary: "已使用本地硬规则回退评分。",
+  };
+}
+
+async function reviewGeneratedPrompts(providerName, result, options, generated, selfTest = null) {
+  const target = normalizePromptTarget(options.target);
+  const endpointUrl = providerName === "grobotai" ? buildGrobotaiPromptUrl() : buildAiEndpointUrl();
+  const headers = providerName === "grobotai" ? buildGrobotaiRequestHeaders() : buildAiRequestHeaders();
+  const selfTestImageAnalyses =
+    Array.isArray(selfTest?.imageDataUrls) && selfTest.imageDataUrls.length
+      ? await requestVisionAnalyses(endpointUrl, headers, selfTest.imageDataUrls)
+      : [];
+  const reviewPayload = buildPromptReviewPayload(
+    target,
+    result,
+    options,
+    generated,
+    selfTest,
+    selfTestImageAnalyses
+  );
+  const requestModel = AI_API_MODEL;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(
+    () => controller.abort(),
+    Math.max(30000, Math.min(resolvePromptRequestTimeoutMs(target), 60000))
+  );
+  const responseFormats = buildPromptReviewResponseFormats(target);
+
+  try {
+    let lastError = null;
+
+    for (const responseFormat of responseFormats) {
+      const requestPayload = {
+        model: requestModel,
+        temperature: 0,
+        messages: [
+          {
+            role: "system",
+            content: buildPromptReviewSystemPrompt(target),
+          },
+          {
+            role: "user",
+            content: reviewPayload,
+          },
+        ],
+      };
+
+      if (responseFormat) {
+        requestPayload.response_format = responseFormat;
+      }
+
+      const response = await fetch(endpointUrl, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(requestPayload),
+        signal: controller.signal,
+      });
+
+      const rawText = await response.text();
+      if (!response.ok) {
+        const error = new Error(`Prompt review failed: ${response.status} ${truncateErrorText(rawText)}`);
+        if (shouldRetryWithoutStructuredOutput(response.status, rawText)) {
+          lastError = error;
+          continue;
+        }
+
+        throw error;
+      }
+
+      const parsed = parseAiResponsePayload(rawText);
+      const content = extractAiMessageContent(parsed);
+      const reviewJson = parsePromptReviewJson(content, target);
+      return normalizePromptReviewResult(reviewJson, target);
+    }
+
+    throw lastError || new Error("Prompt review failed.");
+  } catch (error) {
+    return buildFallbackPromptReview(target, generated, result, options, selfTest);
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+function buildPromptReviewPayload(
+  target,
+  result,
+  options,
+  generated,
+  selfTest = null,
+  selfTestImageAnalyses = []
+) {
+  const title = String(result?.title || "").trim();
+  const body = String(result?.body || "").trim();
+  const tags = Array.isArray(result?.tags)
+    ? result.tags.map((tag) => String(tag || "").trim()).filter(Boolean)
+    : [];
+  const imageAnalyses = Array.isArray(result?.imageAnalyses) ? result.imageAnalyses : [];
+  const rewritePrompt = unwrapMarkdownCodeBlock(generated?.rewritePrompt || "");
+  const imagePrompt = unwrapMarkdownCodeBlock(generated?.imagePrompt || "");
+
+  const lines = [
+    `审查目标：${target === "rewrite" ? "仿写提示词" : target === "image" ? "生图提示词" : "仿写提示词 + 生图提示词"}`,
+    `原笔记标题：${title || "-"}`,
+    `原笔记正文：${body || "-"}`,
+    `原笔记标签：${tags.length ? tags.join("、") : "-"}`,
+    `参考图分析数量：${imageAnalyses.length}`,
+    "",
+    "用户原始补充要求：",
+    `- rewriteInstruction: ${String(options.rewriteInstruction || options.rewriteDirection || "").trim() || "-"}`,
+    `- imageInstruction: ${String(options.imageInstruction || options.imageDirection || "").trim() || "-"}`,
+    "",
+    "自测输入：",
+    `- 地点变量: ${String(selfTest?.location || "").trim() || "-"}`,
+    `- 图片说明: ${String(selfTest?.imageInfo || "").trim() || "-"}`,
+    `- 自测图片数量: ${Array.isArray(selfTest?.imageDataUrls) ? selfTest.imageDataUrls.length : 0}`,
+    "",
+    "生成结果：",
+  ];
+
+  if (target !== "image") {
+    lines.push("", "[rewrite_prompt]", rewritePrompt || "-");
+  }
+
+  if (target !== "rewrite") {
+    lines.push("", "[image_prompt]", imagePrompt || "-");
+  }
+
+  if (imageAnalyses.length) {
+    lines.push("", "参考图视觉摘要：");
+    imageAnalyses.forEach((item, index) => {
+      lines.push(
+        `图${index + 1}：风格=${String(item?.style || "").trim() || "-"}；构图=${String(item?.composition || "").trim() || "-"}；光线=${String(item?.light || "").trim() || "-"}；色彩=${String(item?.color || "").trim() || "-"}；氛围=${String(item?.mood || "").trim() || "-"}`
+      );
+    });
+  }
+
+  if (selfTestImageAnalyses.length) {
+    lines.push("", "自测图片视觉摘要：");
+    selfTestImageAnalyses.forEach((item, index) => {
+      lines.push(
+        `自测图${index + 1}：风格=${String(item?.style || "").trim() || "-"}；构图=${String(item?.composition || "").trim() || "-"}；光线=${String(item?.light || "").trim() || "-"}；色彩=${String(item?.color || "").trim() || "-"}；氛围=${String(item?.mood || "").trim() || "-"}`
+      );
+    });
+  }
+
+  lines.push("", "请从以下维度判卷：", "- 是否紧贴原笔记/参考图，而不是泛化模板", "- 是否保留足够强的素人实拍感/真实摄影感", "- 是否能直接给下游模型使用", "- 是否缺少关键结构或变量", "- 是否存在空话、跑题、编造、混入无关视觉语言");
+
+  return lines.join("\n");
+}
+
+function buildPromptReviewSystemPrompt(target) {
+  const lines = [
+    "你是提示词质量审查员，只负责判卷，不负责展开写作。",
+    "你的任务是检查提示词是否足够像原笔记/参考图的风格，并判断是否足够像素人实拍、真实摄影、可直接投喂。",
+    "只输出 JSON，不要输出解释文字。",
+    "评分标准：100 分满分，80 分以上才算通过；如果明显跑题、空泛、缺结构或缺真实实拍感，必须判不通过。",
+  ];
+
+  if (target === "rewrite") {
+    lines.push("你只审查 rewrite_prompt。重点看标题策略、正文结构、语气节奏、标签策略、写作限制、地点变量是否明确。");
+  } else if (target === "image") {
+    lines.push("你只审查 image_prompt。重点看真实实拍感、视觉语言贴合度、构图/光线/色彩/材质是否具体，以及是否能直接投喂生图模型。");
+    lines.push("如果提供了自测图片样本，请把它们视为判卷基准，判断生成结果是否足够接近样本的实拍质感与镜头逻辑。");
+  } else {
+    lines.push("你同时审查 rewrite_prompt 和 image_prompt，分别打分，再给出总评。");
+  }
+
+  return lines.join("\n");
+}
+
+function buildPromptReviewResponseFormats(target) {
+  const itemSchema = {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      pass: { type: "boolean" },
+      score: { type: "number" },
+      issues: {
+        type: "array",
+        items: { type: "string" },
+      },
+      missing_points: {
+        type: "array",
+        items: { type: "string" },
+      },
+      rewrite_instruction: { type: "string" },
+      summary: { type: "string" },
+    },
+    required: ["pass", "score", "issues", "missing_points", "rewrite_instruction", "summary"],
+  };
+
+  if (target === "all") {
+    return [
+      {
+        type: "json_schema",
+        json_schema: {
+          name: "prompt_review_schema",
+          strict: true,
+          schema: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              pass: { type: "boolean" },
+              summary: { type: "string" },
+              rewrite: itemSchema,
+              image: itemSchema,
+            },
+            required: ["pass", "summary", "rewrite", "image"],
+          },
+        },
+      },
+      { type: "json_object" },
+      null,
+    ];
+  }
+
+  return [
+    {
+      type: "json_schema",
+      json_schema: {
+        name: "prompt_review_schema",
+        strict: true,
+        schema: itemSchema,
+      },
+    },
+    { type: "json_object" },
+    null,
+  ];
+}
+
+function parsePromptReviewJson(content, target) {
+  const parsed = parseAiJsonContent(content, target === "all" ? "all" : target);
+  return parsed;
+}
+
+function normalizePromptReviewResult(reviewJson, target) {
+  if (target === "all") {
+    const rewrite = normalizeSinglePromptReview(reviewJson?.rewrite, "rewrite");
+    const image = normalizeSinglePromptReview(reviewJson?.image, "image");
+    return {
+      pass: Boolean(reviewJson?.pass && rewrite.pass && image.pass),
+      summary: String(reviewJson?.summary || "").trim(),
+      rewrite,
+      image,
+    };
+  }
+
+  return normalizeSinglePromptReview(reviewJson, target);
+}
+
+function normalizeSinglePromptReview(reviewJson, target) {
+  const score = Number(reviewJson?.score);
+  const scoreValue = Number.isFinite(score) ? Math.max(0, Math.min(100, score)) : 0;
+  const issues = Array.isArray(reviewJson?.issues)
+    ? reviewJson.issues.map((item) => String(item || "").trim()).filter(Boolean)
+    : [];
+  const missingPoints = Array.isArray(reviewJson?.missing_points)
+    ? reviewJson.missing_points.map((item) => String(item || "").trim()).filter(Boolean)
+    : [];
+  const rewriteInstruction = String(reviewJson?.rewrite_instruction || "").trim();
+  const summary = String(reviewJson?.summary || "").trim();
+  const pass = Boolean(reviewJson?.pass) && scoreValue >= AI_PROMPT_SELF_CHECK_MIN_SCORE;
+
+  return {
+    pass,
+    score: scoreValue,
+    issues,
+    missing_points: missingPoints,
+    rewrite_instruction: rewriteInstruction,
+    summary,
+    target,
+  };
+}
+
+function assessPromptTextQuality(target, promptText, result, options) {
+  const normalizedText = unwrapMarkdownCodeBlock(promptText);
+  const issues = [];
+  const missingPoints = [];
+
+  if (!normalizedText) {
+    issues.push("提示词为空或无法解析。");
+  }
+
+  if (normalizedText.length < (target === "image" ? 220 : 260)) {
+    issues.push("提示词过短，信息密度不足。");
+  }
+
+  if (!/^```[\w-]*\n[\s\S]*\n```$/m.test(String(promptText || "").trim())) {
+    issues.push("没有按 markdown 代码块输出。");
+  }
+
+  if (target === "rewrite") {
+    const requiredMarkers = [
+      "标题要求",
+      "开头钩子",
+      "正文结构",
+      "高频元素",
+      "结尾动作",
+      "标签策略",
+      "写作限制",
+    ];
+    const hitCount = requiredMarkers.filter((marker) => normalizedText.includes(marker)).length;
+
+    if (hitCount < 5) {
+      issues.push("rewrite_prompt 的结构模块不够完整。");
+    }
+
+    if (!normalizedText.includes(WORKFLOW_TEMPLATE_VARIABLES.locationContext)) {
+      issues.push("rewrite_prompt 没有稳定使用地点变量。");
+    }
+
+    if (!/仿写|生文|提示词/.test(normalizedText)) {
+      issues.push("rewrite_prompt 没有体现它是给下游 AI 用的仿写提示词。");
+    }
+
+    if (!/实拍|真实|人味|口语|像素人/.test(normalizedText)) {
+      missingPoints.push("可以更明确保留原笔记的人味、口语感和真实分享感。");
+    }
+  } else {
+    if (!normalizedText.includes(WORKFLOW_TEMPLATE_VARIABLES.imageLocationContext)) {
+      issues.push("image_prompt 没有稳定使用地点变量。");
+    }
+
+    if (!/真实拍摄|实拍|真实摄影|素人实拍|实景/.test(normalizedText)) {
+      issues.push("image_prompt 的实拍感描述不够明确。");
+    }
+
+    if (!/构图|光线|色彩|质感|镜头|氛围/.test(normalizedText)) {
+      issues.push("image_prompt 的视觉要素太少，缺少可执行的画面语言。");
+    }
+
+    if (!/提示词|prompt|成图/.test(normalizedText)) {
+      missingPoints.push("可以再加强它是可直接投喂生图模型的最终 prompt。");
+    }
+  }
+
+  const resultScore = Math.max(
+    0,
+    100 -
+      issues.length * 16 -
+      missingPoints.length * 6 -
+      Math.max(0, 220 - normalizedText.length) / 20
+  );
+  const pass = issues.length === 0 && resultScore >= AI_PROMPT_SELF_CHECK_MIN_SCORE;
+  return {
+    pass,
+    score: Math.max(0, Math.round(resultScore)),
+    issues,
+    missing_points: missingPoints,
+    rewrite_instruction: buildPromptReviewFeedback(
+      {
+        score: resultScore,
+        issues,
+        missing_points: missingPoints,
+      },
+      target
+    ),
+    summary: pass ? "本地硬规则检查通过。" : "本地硬规则检查未通过。",
+  };
+}
+
+function unwrapMarkdownCodeBlock(value) {
+  const normalized = String(value || "").trim();
+  if (!normalized) {
+    return "";
+  }
+
+  const match = normalized.match(/^```(?:markdown|md|json|text)?\s*\n([\s\S]*?)\n```$/i);
+  if (match && match[1]) {
+    return match[1].trim();
+  }
+
+  return normalized
+    .replace(/^```[\w-]*\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .trim();
+}
+
+function normalizePositiveInteger(value, fallback) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return fallback;
+  }
+
+  return parsed;
 }
 
 function buildAiEndpointUrl() {

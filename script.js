@@ -23,6 +23,21 @@ const rewriteMessagesOutput = document.querySelector("#rewrite-messages-output")
 const rewriteDirectionInput = document.querySelector("#rewrite-direction-input");
 const regeneratePromptButton = document.querySelector("#regenerate-prompt-button");
 const copyPromptButton = document.querySelector("#copy-prompt-button");
+const promptLocationInput = document.querySelector("#prompt-location-input");
+const promptImageUploadZone = document.querySelector("#prompt-image-upload-zone");
+const promptImageUploadButton = document.querySelector("#prompt-image-upload-button");
+const promptImageUploadInput = document.querySelector("#prompt-image-upload-input");
+const promptImageInfoInput = document.querySelector("#prompt-image-info-input");
+const promptImagePreview = document.querySelector("#prompt-image-preview");
+const runSelfTestButton = document.querySelector("#run-selftest-button");
+const selftestLocationValue = document.querySelector("#selftest-location-value");
+const selftestImageInfoValue = document.querySelector("#selftest-image-info-value");
+const selftestImageCountValue = document.querySelector("#selftest-image-count-value");
+const selftestImageList = document.querySelector("#selftest-image-list");
+const selftestStatusValue = document.querySelector("#selftest-status-value");
+const selftestRewriteScoreValue = document.querySelector("#selftest-rewrite-score-value");
+const selftestImageScoreValue = document.querySelector("#selftest-image-score-value");
+const selftestSummaryValue = document.querySelector("#selftest-summary-value");
 const resultImagePrompt = document.querySelector("#result-image-prompt");
 const imageMessagesOutput = document.querySelector("#image-messages-output");
 const imageDirectionInput = document.querySelector("#image-direction-input");
@@ -35,6 +50,7 @@ const MAX_REFERENCE_MEDIA = 14;
 const IMAGE_PROMPT_REFERENCE_LIMIT = 8;
 const DEFAULT_SUBMIT_BUTTON_TEXT = "开始解析";
 const HISTORY_STORAGE_KEY = "note-parser:url-history";
+const PROMPT_VARIABLE_STORAGE_KEY = "note-parser:prompt-variable-values";
 const HISTORY_LIMIT = 12;
 
 const SAMPLE_TAGS = ["内容解析", "链接抓取", "笔记结构化"];
@@ -67,6 +83,12 @@ let rewritePromptRequestSerial = 0;
 let imagePromptRequestSerial = 0;
 let urlHistory = loadUrlHistory();
 let currentParsedResult = null;
+let currentRewritePromptRaw = null;
+let currentImagePromptRaw = null;
+let promptVariableState = loadPromptVariableState();
+let promptImageAssets = [];
+let currentSelfTestRun = null;
+let selfTestRequestSerial = 0;
 const mediaLinkState = {
   activeTab: "images",
   images: [],
@@ -75,9 +97,72 @@ const mediaLinkState = {
 
 warnIfOpenedFromFile();
 renderUrlHistory();
+syncPromptVariableInputs();
+renderPromptSelfTestSummary();
 setSubmitButtonState("idle");
 setRegenerateButtonState(regeneratePromptButton, false, "重新生成");
 setRegenerateButtonState(regenerateImagePromptButton, false, "重新生成");
+updateSelfTestButtonState();
+
+[
+  promptLocationInput,
+  promptImageInfoInput,
+].forEach((input) => {
+  if (!input) {
+    return;
+  }
+
+  input.addEventListener("input", handlePromptVariableInputChange);
+  input.addEventListener("change", handlePromptVariableInputChange);
+});
+
+if (promptImageUploadButton) {
+  promptImageUploadButton.addEventListener("click", () => {
+    promptImageUploadInput?.click();
+  });
+}
+
+if (promptImageUploadInput) {
+  promptImageUploadInput.addEventListener("change", handlePromptImageUploadInputChange);
+}
+
+if (promptImageUploadZone) {
+  promptImageUploadZone.addEventListener("dragover", handlePromptImageDragOver);
+  promptImageUploadZone.addEventListener("dragleave", handlePromptImageDragLeave);
+  promptImageUploadZone.addEventListener("drop", handlePromptImageDrop);
+}
+
+if (promptImageInfoInput) {
+  promptImageInfoInput.addEventListener("dragover", handlePromptImageDragOver);
+  promptImageInfoInput.addEventListener("dragleave", handlePromptImageDragLeave);
+  promptImageInfoInput.addEventListener("drop", handlePromptImageDrop);
+}
+
+[
+  resultPrompt,
+  resultImagePrompt,
+].forEach((input) => {
+  if (!input) {
+    return;
+  }
+
+  input.addEventListener("input", handlePromptTemplateInputChange);
+  input.addEventListener("change", handlePromptTemplateInputChange);
+});
+
+if (runSelfTestButton) {
+  runSelfTestButton.addEventListener("click", async () => {
+    await runSelfTest();
+  });
+}
+
+window.addEventListener("beforeunload", () => {
+  promptImageAssets.forEach((asset) => {
+    if (asset?.url) {
+      URL.revokeObjectURL(asset.url);
+    }
+  });
+});
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -294,6 +379,316 @@ function saveUrlHistory() {
   }
 }
 
+function loadPromptVariableState() {
+  const fallback = {
+    location: "",
+    imageInfo: "",
+  };
+
+  try {
+    const raw = window.localStorage.getItem(PROMPT_VARIABLE_STORAGE_KEY);
+    const parsed = JSON.parse(raw || "{}");
+
+    if (!parsed || typeof parsed !== "object") {
+      return fallback;
+    }
+
+    return {
+      location: String(parsed.location || "").trim(),
+      imageInfo: String(parsed.imageInfo || "").trim(),
+    };
+  } catch (error) {
+    return fallback;
+  }
+}
+
+function savePromptVariableState() {
+  try {
+    window.localStorage.setItem(PROMPT_VARIABLE_STORAGE_KEY, JSON.stringify(promptVariableState));
+  } catch (error) {
+    return;
+  }
+}
+
+function syncPromptVariableInputs() {
+  if (promptLocationInput) {
+    promptLocationInput.value = promptVariableState.location || "";
+  }
+
+  if (promptImageInfoInput) {
+    promptImageInfoInput.value = promptVariableState.imageInfo || "";
+  }
+
+  renderPromptImagePreviews();
+}
+
+function readPromptVariableInputs() {
+  return {
+    location: typeof promptLocationInput?.value === "string" ? promptLocationInput.value.trim() : "",
+    imageInfo: typeof promptImageInfoInput?.value === "string" ? promptImageInfoInput.value.trim() : "",
+  };
+}
+
+function handlePromptVariableInputChange() {
+  promptVariableState = readPromptVariableInputs();
+  savePromptVariableState();
+  currentSelfTestRun = null;
+  renderPromptSelfTestSummary();
+}
+
+function handlePromptTemplateInputChange() {
+  currentSelfTestRun = null;
+  updateSelfTestButtonState();
+  renderPromptSelfTestSummary();
+}
+
+function handlePromptImageUploadInputChange(event) {
+  const files = Array.from(event?.target?.files || []);
+  if (!files.length) {
+    return;
+  }
+
+  appendPromptImageAssets(files);
+  if (promptImageUploadInput) {
+    promptImageUploadInput.value = "";
+  }
+}
+
+function handlePromptImageDragOver(event) {
+  event.preventDefault();
+  event.stopPropagation();
+  promptImageUploadZone?.classList.add("is-dragover");
+}
+
+function handlePromptImageDragLeave(event) {
+  event.preventDefault();
+  event.stopPropagation();
+  promptImageUploadZone?.classList.remove("is-dragover");
+}
+
+function handlePromptImageDrop(event) {
+  event.preventDefault();
+  event.stopPropagation();
+  promptImageUploadZone?.classList.remove("is-dragover");
+
+  const files = Array.from(event.dataTransfer?.files || []).filter((file) =>
+    String(file?.type || "").startsWith("image/")
+  );
+
+  if (!files.length) {
+    return;
+  }
+
+  appendPromptImageAssets(files);
+}
+
+function appendPromptImageAssets(files) {
+  const imageFiles = Array.from(files || []).filter((file) =>
+    String(file?.type || "").startsWith("image/")
+  );
+
+  if (!imageFiles.length) {
+    return;
+  }
+
+  const newAssets = imageFiles.map((file) => ({
+    id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    file,
+    url: URL.createObjectURL(file),
+    dataUrl: "",
+  }));
+
+  promptImageAssets = [...promptImageAssets, ...newAssets];
+  currentSelfTestRun = null;
+  renderPromptImagePreviews();
+  void hydratePromptImageAssetDataUrls(newAssets);
+}
+
+function removePromptImageAsset(assetId) {
+  const nextAssets = [];
+
+  promptImageAssets.forEach((asset) => {
+    if (asset.id === assetId) {
+      URL.revokeObjectURL(asset.url);
+      return;
+    }
+    nextAssets.push(asset);
+  });
+
+  promptImageAssets = nextAssets;
+  currentSelfTestRun = null;
+  renderPromptImagePreviews();
+}
+
+function renderPromptImagePreviews() {
+  if (!promptImagePreview) {
+    return;
+  }
+
+  promptImagePreview.innerHTML = "";
+
+  if (!promptImageAssets.length) {
+    const empty = document.createElement("div");
+    empty.className = "variable-preview-empty";
+    empty.textContent = "上传后会在这里显示缩略图。";
+    promptImagePreview.appendChild(empty);
+    return;
+  }
+
+  promptImageAssets.forEach((asset, index) => {
+    const item = document.createElement("figure");
+    item.className = "variable-preview-item";
+
+    const img = document.createElement("img");
+    img.src = asset.url;
+    img.alt = asset.file?.name || `图片 ${index + 1}`;
+
+    const caption = document.createElement("figcaption");
+    caption.textContent = asset.file?.name || `图片 ${index + 1}`;
+
+    const removeButton = document.createElement("button");
+    removeButton.type = "button";
+    removeButton.className = "variable-preview-remove";
+    removeButton.textContent = "移除";
+    removeButton.addEventListener("click", () => {
+      removePromptImageAsset(asset.id);
+    });
+
+    item.append(img, caption, removeButton);
+    promptImagePreview.appendChild(item);
+  });
+}
+
+function renderPromptSelfTestSummary() {
+  setSelfTestFieldValue(selftestLocationValue, promptVariableState.location);
+  setSelfTestFieldValue(selftestImageInfoValue, promptVariableState.imageInfo);
+
+  if (selftestImageCountValue) {
+    selftestImageCountValue.textContent = `${promptImageAssets.length} 张`;
+  }
+
+  if (selftestImageList) {
+    selftestImageList.innerHTML = "";
+    if (!promptImageAssets.length) {
+      const empty = document.createElement("div");
+      empty.className = "selftest-summary-empty";
+      empty.textContent = "还没有上传图片样本。";
+      selftestImageList.appendChild(empty);
+    } else {
+      promptImageAssets.forEach((asset, index) => {
+        const item = document.createElement("figure");
+        item.className = "selftest-summary-thumb";
+
+        const img = document.createElement("img");
+        img.src = asset.url;
+        img.alt = asset.file?.name || `图片 ${index + 1}`;
+
+        const caption = document.createElement("figcaption");
+        caption.textContent = asset.file?.name || `图片 ${index + 1}`;
+
+        item.append(img, caption);
+        selftestImageList.appendChild(item);
+      });
+    }
+  }
+
+  const run = currentSelfTestRun;
+  setSelfTestFieldValue(selftestStatusValue, run?.statusText || "未执行");
+  setSelfTestFieldValue(selftestRewriteScoreValue, run?.rewriteScoreText || "-");
+  setSelfTestFieldValue(selftestImageScoreValue, run?.imageScoreText || "-");
+  setSelfTestFieldValue(selftestSummaryValue, run?.summary || "-");
+}
+
+function setSelfTestFieldValue(element, value) {
+  if (!element) {
+    return;
+  }
+
+  const text = String(value || "").trim();
+  element.textContent = text || "-";
+}
+
+function updateSelfTestButtonState() {
+  if (!runSelfTestButton) {
+    return;
+  }
+
+  const canRun = hasGeneratedPromptTemplates();
+  runSelfTestButton.disabled = !canRun;
+  runSelfTestButton.textContent = canRun ? "自测" : "请先生成 Prompt";
+  runSelfTestButton.classList.toggle("is-busy", false);
+}
+
+function hasGeneratedPromptTemplates() {
+  return isPromptTemplateTextReady(resultPrompt?.value) && isPromptTemplateTextReady(resultImagePrompt?.value);
+}
+
+function isPromptTemplateTextReady(value) {
+  const text = String(value || "").trim();
+  if (!text) {
+    return false;
+  }
+
+  if (
+    text === "-" ||
+    text.includes("正在调用 AI") ||
+    text.includes("请先生成") ||
+    text.startsWith("Generation failed:") ||
+    text.startsWith("未通过大模型生成提示词")
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+async function hydratePromptImageAssetDataUrls(assets) {
+  await Promise.all(
+    (Array.isArray(assets) ? assets : []).map(async (asset) => {
+      if (!asset || asset.dataUrl) {
+        return;
+      }
+
+      asset.dataUrl = await readFileAsDataUrl(asset.file);
+    })
+  );
+}
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    if (!file) {
+      resolve("");
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      resolve(typeof reader.result === "string" ? reader.result : "");
+    };
+    reader.onerror = () => {
+      reject(reader.error || new Error("读取图片失败。"));
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+function getPromptImageAssetDataUrl(asset) {
+  if (!asset) {
+    return Promise.resolve("");
+  }
+
+  if (typeof asset.dataUrl === "string" && asset.dataUrl) {
+    return Promise.resolve(asset.dataUrl);
+  }
+
+  return readFileAsDataUrl(asset.file).then((dataUrl) => {
+    if (dataUrl) {
+      asset.dataUrl = dataUrl;
+    }
+    return dataUrl;
+  });
+}
+
 function pushUrlHistory(noteUrl) {
   const normalized = String(noteUrl || "").trim();
   if (!normalized) {
@@ -405,6 +800,8 @@ async function buildPromptRequestPayload(result, options = {}) {
         ? options.imageDirection.trim()
         : "";
 
+  const selfTest = await buildPromptSelfTestPayload();
+
   return {
     result: {
       title: result?.title || "",
@@ -416,6 +813,18 @@ async function buildPromptRequestPayload(result, options = {}) {
     target,
     rewriteInstruction,
     imageInstruction: target === "rewrite" ? "" : imageInstruction,
+    selfTest,
+  };
+}
+
+async function buildPromptSelfTestPayload() {
+  const imageDataUrls = await Promise.all(promptImageAssets.map((asset) => getPromptImageAssetDataUrl(asset)));
+
+  return {
+    location: promptVariableState.location,
+    imageInfo: typeof promptImageInfoInput?.value === "string" ? promptImageInfoInput.value.trim() : "",
+    imageCount: imageDataUrls.filter(Boolean).length,
+    imageDataUrls: imageDataUrls.filter(Boolean),
   };
 }
 
@@ -440,6 +849,7 @@ async function requestAiPrompts(result, options = {}) {
   return {
     rewritePrompt: typeof parsed?.rewritePrompt === "string" ? parsed.rewritePrompt.trim() : "",
     imagePrompt: typeof parsed?.imagePrompt === "string" ? parsed.imagePrompt.trim() : "",
+    qualityReview: parsed?.qualityReview || null,
     debugMessages: Array.isArray(parsed?.debugMessages) ? parsed.debugMessages : [],
   };
 }
@@ -467,6 +877,9 @@ function buildFallbackResult(noteUrl, rawText) {
 
 function renderResult(result) {
   currentParsedResult = result;
+  currentRewritePromptRaw = null;
+  currentImagePromptRaw = null;
+  currentSelfTestRun = null;
   emptyState.classList.add("hidden");
   resultCard.classList.remove("hidden");
 
@@ -484,6 +897,7 @@ function renderResult(result) {
   resultImagePrompt.value = "正在调用 AI 生成可直接用于生图的最终 Prompt，请稍候...";
   setRegenerateButtonState(regeneratePromptButton, true, "重新生成");
   setRegenerateButtonState(regenerateImagePromptButton, true, "重新生成");
+  updateSelfTestButtonState();
   resetCopyButton();
   resetImagePromptButton();
   resetAllImagesButton();
@@ -501,6 +915,8 @@ function renderResult(result) {
     tag.textContent = `#${tagText}`;
     resultTags.appendChild(tag);
   });
+
+  renderPromptSelfTestSummary();
 }
 
 function setPromptMessagesOutput(output, messages) {
@@ -522,6 +938,19 @@ function formatDirectRewritePromptOutput(value) {
   }
 
   return normalized;
+}
+
+function renderPromptOutputsFromRaw() {
+  if (currentRewritePromptRaw !== null) {
+    resultPrompt.value = formatDirectRewritePromptOutput(currentRewritePromptRaw);
+  }
+
+  if (currentImagePromptRaw !== null) {
+    const normalized = typeof currentImagePromptRaw === "string" ? currentImagePromptRaw.trim() : "";
+    resultImagePrompt.value = normalized ? normalized : getPromptNotGeneratedText();
+  }
+
+  updateSelfTestButtonState();
 }
 
 function formatPromptErrorText(error, fallbackText = "") {
@@ -565,10 +994,12 @@ async function hydratePromptOutputs(result, options = {}) {
 
     if (rewriteRequestId === rewritePromptRequestSerial) {
       setPromptMessagesOutput(rewriteMessagesOutput, aiPrompts.debugMessages);
-      resultPrompt.value = formatDirectRewritePromptOutput(aiPrompts.rewritePrompt);
+      currentRewritePromptRaw = aiPrompts.rewritePrompt || "";
+      renderPromptOutputsFromRaw();
     }
   } catch (error) {
     if (rewriteRequestId === rewritePromptRequestSerial) {
+      currentRewritePromptRaw = null;
       resultPrompt.value = formatPromptErrorText(error, getPromptNotGeneratedText());
       setPromptMessagesOutput(rewriteMessagesOutput, error?.debugMessages);
     }
@@ -596,14 +1027,152 @@ async function hydrateAiImagePrompt(result, requestId, direction = "") {
     }
 
     setPromptMessagesOutput(imageMessagesOutput, []);
-    resultImagePrompt.value = aiPrompts.imagePrompt || getPromptNotGeneratedText();
+    currentImagePromptRaw = aiPrompts.imagePrompt || "";
+    renderPromptOutputsFromRaw();
   } catch (error) {
     if (requestId !== imagePromptRequestSerial) {
       return;
     }
+    currentImagePromptRaw = null;
     resultImagePrompt.value = formatPromptErrorText(error, getPromptNotGeneratedText());
     setPromptMessagesOutput(imageMessagesOutput, error?.debugMessages);
   }
+}
+
+async function runSelfTest() {
+  if (!currentParsedResult || !hasGeneratedPromptTemplates()) {
+    currentSelfTestRun = {
+      statusText: "未开始",
+      rewriteScoreText: "-",
+      imageScoreText: "-",
+      summary: "请先生成仿写和生图 prompt，再执行自测。",
+    };
+    renderPromptSelfTestSummary();
+    return;
+  }
+
+  const requestId = ++selfTestRequestSerial;
+  setSelfTestButtonLoading(true);
+  currentSelfTestRun = {
+    statusText: "执行中",
+    rewriteScoreText: "-",
+    imageScoreText: "-",
+    summary: "正在执行自测，请稍候...",
+  };
+  renderPromptSelfTestSummary();
+
+  try {
+    const selfTestResult = await requestSelfTestReview({
+      result: currentParsedResult,
+      rewritePrompt: getRewritePromptTemplateValue(),
+      imagePrompt: getImagePromptTemplateValue(),
+      selfTest: await buildPromptSelfTestPayload(),
+    });
+
+    if (requestId !== selfTestRequestSerial) {
+      return;
+    }
+
+    const review = selfTestResult?.qualityReview || null;
+    currentSelfTestRun = {
+      statusText: review?.pass ? "通过" : "未通过",
+      rewriteScoreText: formatPromptReviewScore(review?.rewrite),
+      imageScoreText: formatPromptReviewScore(review?.image),
+      summary: formatSelfTestSummaryText(review),
+    };
+  } catch (error) {
+    if (requestId !== selfTestRequestSerial) {
+      return;
+    }
+
+    currentSelfTestRun = {
+      statusText: "失败",
+      rewriteScoreText: "-",
+      imageScoreText: "-",
+      summary:
+        error instanceof Error && error.message.trim()
+          ? error.message.trim()
+          : "自测失败，请稍后重试。",
+    };
+  } finally {
+    if (requestId === selfTestRequestSerial) {
+      setSelfTestButtonLoading(false);
+      renderPromptSelfTestSummary();
+    }
+  }
+}
+
+async function requestSelfTestReview(payload) {
+  const response = await fetch("/api/selftest", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  const parsed = await response.json().catch(() => null);
+  if (!response.ok) {
+    const error = new Error(parsed?.error || "AI 自测失败。");
+    error.debugMessages = Array.isArray(parsed?.debugMessages) ? parsed.debugMessages : [];
+    throw error;
+  }
+
+  return parsed;
+}
+
+function setSelfTestButtonLoading(isLoading) {
+  if (!runSelfTestButton) {
+    return;
+  }
+
+  if (!hasGeneratedPromptTemplates()) {
+    runSelfTestButton.disabled = true;
+    runSelfTestButton.textContent = "请先生成 Prompt";
+    runSelfTestButton.classList.toggle("is-busy", false);
+    return;
+  }
+
+  runSelfTestButton.disabled = Boolean(isLoading);
+  runSelfTestButton.textContent = isLoading ? "自测中..." : "自测";
+  runSelfTestButton.classList.toggle("is-busy", Boolean(isLoading));
+}
+
+function getRewritePromptTemplateValue() {
+  return typeof resultPrompt?.value === "string" ? resultPrompt.value.trim() : "";
+}
+
+function getImagePromptTemplateValue() {
+  return typeof resultImagePrompt?.value === "string" ? resultImagePrompt.value.trim() : "";
+}
+
+function formatPromptReviewScore(review) {
+  if (!review || typeof review !== "object") {
+    return "-";
+  }
+
+  const score = Number(review.score);
+  return Number.isFinite(score) ? `${Math.round(score)}/100` : "-";
+}
+
+function formatSelfTestSummaryText(review) {
+  if (!review || typeof review !== "object") {
+    return "-";
+  }
+
+  if (review.summary) {
+    return String(review.summary).trim();
+  }
+
+  if (review.rewrite && review.image) {
+    const rewritePass = review.rewrite.pass ? "通过" : "未通过";
+    const imagePass = review.image.pass ? "通过" : "未通过";
+    const rewriteScore = formatPromptReviewScore(review.rewrite);
+    const imageScore = formatPromptReviewScore(review.image);
+    return `仿写 ${rewritePass}（${rewriteScore}），生图 ${imagePass}（${imageScore}）`;
+  }
+
+  return review.pass ? "通过" : "未通过";
 }
 
 async function regenerateRewritePrompt() {
@@ -627,12 +1196,14 @@ async function regenerateRewritePrompt() {
       return;
     }
 
-    resultPrompt.value = formatDirectRewritePromptOutput(aiPrompts.rewritePrompt);
+    currentRewritePromptRaw = aiPrompts.rewritePrompt || "";
+    renderPromptOutputsFromRaw();
   } catch (error) {
     if (requestId !== rewritePromptRequestSerial) {
       return;
     }
 
+    currentRewritePromptRaw = null;
     resultPrompt.value = formatPromptErrorText(error, getPromptNotGeneratedText());
   } finally {
     if (requestId === rewritePromptRequestSerial) {
@@ -662,12 +1233,14 @@ async function regenerateImagePrompt() {
     }
 
     setPromptMessagesOutput(imageMessagesOutput, []);
-      resultImagePrompt.value = aiPrompts.imagePrompt || getPromptNotGeneratedText();
+    currentImagePromptRaw = aiPrompts.imagePrompt || "";
+    renderPromptOutputsFromRaw();
   } catch (error) {
     if (requestId !== imagePromptRequestSerial) {
       return;
     }
 
+    currentImagePromptRaw = null;
     resultImagePrompt.value = formatPromptErrorText(error, getPromptNotGeneratedText());
     setPromptMessagesOutput(imageMessagesOutput, error?.debugMessages);
   } finally {

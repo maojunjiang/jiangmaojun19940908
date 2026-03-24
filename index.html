@@ -71,11 +71,12 @@
 
         <section class="panel tools-panel">
           <div class="panel-heading">
-            <h2>解析工具</h2>
-            <p>把解析 URL 和仿写提示词放在同一个模块里，方便对照处理与复制。</p>
+            <h2>生成模块</h2>
+            <p>这里展示解析结果和生成的提示词。</p>
           </div>
 
-          <div class="panel-body tools-grid">
+          <div class="panel-body tools-body">
+            <div class="tools-grid">
             <div class="result-block result-block-links tools-block">
               <div class="result-block-head">
                 <div>
@@ -184,6 +185,126 @@
                   >-</textarea>
                 </div>
               </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel selftest-panel">
+          <div class="panel-heading selftest-panel-heading">
+            <div class="selftest-panel-title">
+              <h2>自测模块</h2>
+              <p>这里的内容只参与提示词自检，不会直接改写下面展示的 prompt 文本。</p>
+            </div>
+            <button type="button" id="run-selftest-button" class="selftest-run-button" disabled>
+              自测
+            </button>
+          </div>
+
+          <div class="panel-body selftest-body">
+            <div class="selftest-grid">
+              <section class="variable-panel" id="prompt-variable-panel">
+                <div class="variable-panel-head">
+                  <div>
+                    <span class="result-label">自测样本</span>
+                    <h3>给自检器填值</h3>
+                  </div>
+                  <p>这些值只用于后端自检和判卷，不会改写下面的 prompt 展示内容。</p>
+                </div>
+
+                <div class="variable-grid">
+                  <label class="variable-field" for="prompt-location-input">
+                    <span>地点变量</span>
+                    <input
+                      id="prompt-location-input"
+                      type="text"
+                      placeholder="例如：杭州"
+                      autocomplete="off"
+                      spellcheck="false"
+                    />
+                  </label>
+
+                  <div class="variable-field variable-field-image">
+                    <span>自测图片和说明</span>
+                    <div id="prompt-image-upload-zone" class="variable-upload-zone">
+                      <input
+                        id="prompt-image-upload-input"
+                        type="file"
+                        accept="image/*"
+                        multiple
+                        hidden
+                      />
+                      <button type="button" id="prompt-image-upload-button" class="variable-upload-button">
+                        选择图片或拖入这里
+                      </button>
+                      <p class="variable-upload-hint">支持多张图片，上传后会自动生成预览，并作为自测样本传给后端判卷。</p>
+                    </div>
+                    <textarea
+                      id="prompt-image-info-input"
+                      rows="3"
+                      placeholder="例如：希望自测的实拍风格、案例说明、比对要求"
+                      spellcheck="false"
+                    ></textarea>
+                    <div id="prompt-image-preview" class="variable-preview-grid" aria-label="已上传图片预览"></div>
+                  </div>
+                </div>
+              </section>
+
+              <section class="selftest-summary-panel">
+                <div class="selftest-summary-head">
+                  <div>
+                    <span class="result-label">测试内容预览</span>
+                    <h3>当前自测输入和执行结果</h3>
+                  </div>
+                </div>
+
+                <div class="selftest-summary-list">
+                  <article class="selftest-test-card">
+                    <div class="selftest-test-head">
+                      <span class="selftest-summary-key">自测输入</span>
+                    </div>
+                    <div class="selftest-test-grid">
+                      <article class="selftest-summary-item">
+                        <span class="selftest-summary-key">地点变量</span>
+                        <strong id="selftest-location-value">-</strong>
+                      </article>
+                      <article class="selftest-summary-item">
+                        <span class="selftest-summary-key">图片说明</span>
+                        <p id="selftest-image-info-value">-</p>
+                      </article>
+                      <article class="selftest-summary-item selftest-summary-wide">
+                        <span class="selftest-summary-key">自测图片</span>
+                        <div class="selftest-summary-meta">
+                          <strong id="selftest-image-count-value">0 张</strong>
+                          <span>点击“自测”后会执行校验</span>
+                        </div>
+                        <div id="selftest-image-list" class="selftest-summary-media"></div>
+                      </article>
+                    </div>
+                  </article>
+
+                  <article class="selftest-test-card">
+                    <div class="selftest-test-head">
+                      <span class="selftest-summary-key">自测结果</span>
+                    </div>
+                    <article class="selftest-summary-item">
+                      <span class="selftest-summary-key">执行状态</span>
+                      <strong id="selftest-status-value">未执行</strong>
+                    </article>
+                    <article class="selftest-summary-item">
+                      <span class="selftest-summary-key">仿写测试</span>
+                      <strong id="selftest-rewrite-score-value">-</strong>
+                    </article>
+                    <article class="selftest-summary-item">
+                      <span class="selftest-summary-key">生图测试</span>
+                      <strong id="selftest-image-score-value">-</strong>
+                    </article>
+                    <article class="selftest-summary-item">
+                      <span class="selftest-summary-key">摘要</span>
+                      <p id="selftest-summary-value">-</p>
+                    </article>
+                  </article>
+                </div>
+              </section>
             </div>
           </div>
         </section>
