@@ -7,7 +7,7 @@ const vm = require("node:vm");
 loadLocalEnvFiles();
 
 const HOST = "127.0.0.1";
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3001;
 const ROOT = __dirname;
 const AI_PROVIDER = String(process.env.AI_PROVIDER || "ark").trim().toLowerCase();
 const AI_API_BASE_URL = String(process.env.AI_API_BASE_URL || "").trim();
@@ -17,17 +17,30 @@ const AI_VISION_MODEL = String(process.env.AI_VISION_MODEL || AI_API_MODEL).trim
 const AI_CHAT_COMPLETIONS_PATH = String(
   process.env.AI_CHAT_COMPLETIONS_PATH || "/api/v3/chat/completions"
 ).trim();
+const AI_IMAGE_GENERATIONS_PATH = String(
+  process.env.AI_IMAGE_GENERATIONS_PATH || "/api/agent/seedream_generation_image_wf"
+).trim();
 const GROBOTAI_PROMPT_PATH = String(
   process.env.GROBOTAI_PROMPT_PATH || "/api/agent/doubao_generate_character_wf"
 ).trim();
 const GROBOTAI_ENTERPRISE_ID = String(process.env.GROBOTAI_ENTERPRISE_ID || "").trim();
-const AI_REQUEST_TIMEOUT_MS = Number.parseInt(process.env.AI_REQUEST_TIMEOUT_MS || "90000", 10);
+const AI_IMAGE_MODEL = String(process.env.AI_IMAGE_MODEL || "doubao-seedream-4-5-251128").trim();
+const AI_IMAGE_SIZE = String(process.env.AI_IMAGE_SIZE || "").trim();
+const AI_IMAGE_MAX_IMAGES = normalizePositiveInteger(process.env.AI_IMAGE_MAX_IMAGES, 5);
+const AI_IMAGE_PROMPT_MODE = String(process.env.AI_IMAGE_PROMPT_MODE || "standard").trim();
+const DEFAULT_AI_REQUEST_TIMEOUT_MS = AI_PROVIDER === "grobotai" ? 180000 : 90000;
+const AI_REQUEST_TIMEOUT_MS = Number.parseInt(
+  process.env.AI_REQUEST_TIMEOUT_MS || String(DEFAULT_AI_REQUEST_TIMEOUT_MS),
+  10
+);
 const AI_IMAGE_REQUEST_TIMEOUT_MS = Number.parseInt(
-  process.env.AI_IMAGE_REQUEST_TIMEOUT_MS || String(Math.max(AI_REQUEST_TIMEOUT_MS, 180000)),
+  process.env.AI_IMAGE_REQUEST_TIMEOUT_MS ||
+    String(Math.max(AI_PROVIDER === "grobotai" ? 300000 : 180000, AI_REQUEST_TIMEOUT_MS)),
   10
 );
 const AI_VISION_TIMEOUT_MS = Number.parseInt(
-  process.env.AI_VISION_TIMEOUT_MS || String(Math.max(AI_IMAGE_REQUEST_TIMEOUT_MS, 180000)),
+  process.env.AI_VISION_TIMEOUT_MS ||
+    String(Math.max(AI_PROVIDER === "grobotai" ? 300000 : 180000, AI_IMAGE_REQUEST_TIMEOUT_MS)),
   10
 );
 const AI_PROMPT_SELF_CHECK_ENABLED = !/^(0|false|off)$/i.test(
@@ -184,6 +197,8 @@ async function handlePromptGeneration(req, res) {
     writeJson(res, 502, {
       error: error instanceof Error ? error.message : "AI 提示词生成失败。",
       debugMessages: Array.isArray(error?.debugMessages) ? error.debugMessages : [],
+      qualityReview: error?.qualityReview || null,
+      generatedPrompts: error?.generatedPrompts || null,
     });
   }
 }
@@ -212,20 +227,12 @@ async function handlePromptSelfTest(req, res) {
   };
 
   try {
-    const review = isAiPromptConfigured()
-      ? await reviewGeneratedPrompts(AI_PROVIDER, result, { target: "all" }, generated, selfTest)
-      : buildFallbackPromptReview("all", generated, result, { target: "all" }, selfTest);
-
     writeJson(res, 200, {
-      qualityReview: review,
+      ...(await executePromptSelfTest(result, generated, selfTest)),
     });
   } catch (error) {
-    const review = buildFallbackPromptReview("all", generated, result, { target: "all" }, selfTest);
-    writeJson(res, 200, {
-      qualityReview: review,
-      debugMessages: [
-        `自测回退到本地规则：${error instanceof Error ? error.message : "未知错误"}`,
-      ],
+    writeJson(res, 502, {
+      error: error instanceof Error ? error.message : "自测执行失败。",
     });
   }
 }
@@ -312,12 +319,86 @@ async function readJsonBody(req) {
     chunks.push(chunk);
   }
 
-  const raw = Buffer.concat(chunks).toString("utf8").trim();
+  const raw = decodeJsonRequestBuffer(Buffer.concat(chunks), req.headers["content-type"]).trim();
   if (!raw) {
     return {};
   }
 
   return JSON.parse(raw);
+}
+
+function decodeJsonRequestBuffer(buffer, contentType = "") {
+  if (!buffer || !buffer.length) {
+    return "";
+  }
+
+  const normalizedCharset = normalizeRequestCharset(contentType);
+  if (normalizedCharset === "utf16le") {
+    return stripBom(buffer.toString("utf16le"));
+  }
+
+  if (normalizedCharset === "latin1") {
+    return buffer.toString("latin1");
+  }
+
+  if (hasUtf16LeBom(buffer)) {
+    return stripBom(buffer.toString("utf16le"));
+  }
+
+  if (looksLikeUtf16Le(buffer)) {
+    return stripBom(buffer.toString("utf16le"));
+  }
+
+  return stripBom(buffer.toString("utf8"));
+}
+
+function normalizeRequestCharset(contentType = "") {
+  const match = String(contentType || "").match(/charset\s*=\s*["']?([^;"'\s]+)/i);
+  const charset = match ? match[1].trim().toLowerCase() : "";
+
+  if (!charset) {
+    return "utf8";
+  }
+
+  if (charset === "utf-8" || charset === "utf8") {
+    return "utf8";
+  }
+
+  if (charset === "utf-16" || charset === "utf-16le" || charset === "utf16" || charset === "utf16le") {
+    return "utf16le";
+  }
+
+  if (charset === "latin1" || charset === "iso-8859-1") {
+    return "latin1";
+  }
+
+  return "utf8";
+}
+
+function hasUtf16LeBom(buffer) {
+  return buffer.length >= 2 && buffer[0] === 0xff && buffer[1] === 0xfe;
+}
+
+function looksLikeUtf16Le(buffer) {
+  if (buffer.length < 4 || buffer.length % 2 !== 0) {
+    return false;
+  }
+
+  let zeroHighBytes = 0;
+  let sampledPairs = 0;
+
+  for (let index = 1; index < buffer.length; index += 2) {
+    sampledPairs += 1;
+    if (buffer[index] === 0x00) {
+      zeroHighBytes += 1;
+    }
+  }
+
+  return sampledPairs > 0 && zeroHighBytes / sampledPairs >= 0.3;
+}
+
+function stripBom(value) {
+  return String(value || "").replace(/^\uFEFF/, "");
 }
 
 function loadLocalEnvFiles() {
@@ -363,8 +444,50 @@ function stripEnvWrappingQuotes(value) {
   return value;
 }
 
+function createTimeoutController(timeoutMs, label) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => {
+    controller.abort(new Error(`${label}超时（${Math.ceil(timeoutMs / 1000)} 秒）`));
+  }, timeoutMs);
+
+  return { controller, timeoutId };
+}
+
+function isAbortLikeError(error) {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+
+  const name = String(error.name || "").toLowerCase();
+  const message = String(error.message || "").toLowerCase();
+  return name === "aborterror" || message.includes("aborted") || message.includes("timeout");
+}
+
+function normalizeTimeoutError(error, label, timeoutMs) {
+  if (!isAbortLikeError(error)) {
+    return error;
+  }
+
+  return new Error(`${label}超时（${Math.ceil(timeoutMs / 1000)} 秒）`);
+}
+
+function extractUrlFromText(value) {
+  const text = String(value || "").trim();
+  if (!text) {
+    return "";
+  }
+
+  const match = text.match(/https?:\/\/[^\s<>"']+/i);
+  if (!match) {
+    return text;
+  }
+
+  return match[0].replace(/[)\]}>）】》"'`,，。！!？?；;：:]+$/u, "");
+}
+
 function normalizeUrl(value) {
-  const completed = /^https?:\/\//i.test(value) ? value : `https://${value}`;
+  const extracted = extractUrlFromText(value);
+  const completed = /^https?:\/\//i.test(extracted) ? extracted : `https://${extracted}`;
   return new URL(completed).toString();
 }
 
@@ -431,6 +554,7 @@ function buildAiSystemPromptV2(target) {
     "输出只允许 JSON，不要添加解释、前言或备注。",
     "如果用户在当前轮补充了额外要求，要把这些要求当成他直接对你说的话来执行。",
     "但用户补充要求不能违背原笔记事实、原文主轴或参考图的核心视觉关系。",
+    "在正式输出前，先在心里按质量标准自检一遍，目标是首轮就达到系统自检通过线。",
   ];
 
   if (target === "rewrite") {
@@ -449,6 +573,41 @@ function buildAiSystemPromptV2(target) {
     lines.push("rewrite_prompt 负责复刻内容表达，image_prompt 负责复刻参考图视觉。");
     lines.push("rewrite_prompt 和 image_prompt 字段里的内容都必须是完整 markdown 代码块字符串，代码块内直接放最终模板。");
   }
+
+  lines.push("", buildPromptGenerationQualityCriteria(target));
+
+  return lines.join("\n");
+}
+
+function buildPromptGenerationQualityCriteria(target) {
+  const lines = [
+    "生成质量标准：",
+    "1. 产物必须可被后端直接判卷通过；通过线为 82 分。",
+    "2. 提示词不能为空，信息密度要足够，不能过短。",
+    "3. rewrite_prompt 和 image_prompt 都必须是完整 markdown 代码块字符串。",
+    "4. 不要输出解释性废话、占位说明或额外备注，代码块里只放最终可复用模板。",
+  ];
+
+  if (target !== "image") {
+    lines.push(
+      "5. rewrite_prompt 必须明确它是给下游 AI 用的仿写提示词，而不是直接成文。",
+      "6. rewrite_prompt 必须结构化，至少稳定覆盖标题要求、开头钩子、正文结构、高频元素、结尾动作、标签策略、写作限制中的大部分模块。",
+      `7. rewrite_prompt 必须稳定使用用户输入变量 ${WORKFLOW_TEMPLATE_VARIABLES.locationContext}。`,
+      "8. rewrite_prompt 必须保留原笔记的人味、口语感和真实分享感，避免空泛模板话。"
+    );
+  }
+
+  if (target !== "rewrite") {
+    lines.push(
+      "9. image_prompt 必须明确体现真实拍摄、实拍、实景、真实摄影这类实拍感。",
+      "10. image_prompt 必须包含构图、光线、色彩、质感、镜头、氛围等可执行视觉语言。",
+      `11. image_prompt 必须稳定使用图片信息变量 ${WORKFLOW_TEMPLATE_VARIABLES.imageLocationContext}。`,
+      `12. image_prompt 必须直接使用产品图变量 ${WORKFLOW_TEMPLATE_VARIABLES.productImageList}，并保留产品外形、比例、品牌与文字信息。`,
+      "13. image_prompt 必须是可直接投喂模型的最终成图 prompt，不要写成解释说明。"
+    );
+  }
+
+  lines.push("14. 如果你发现某一项标准还没满足，先修正后再输出 JSON。");
 
   return lines.join("\n");
 }
@@ -490,6 +649,8 @@ function buildAiUserContentV2(result, imageUrls, options = {}) {
     `原笔记标签：${tags.length ? tags.join("、") : "-"}`,
     "",
     "请优先提炼原文的表达顺序、重点信息、语气和情绪节奏，不要只抽象成泛化分类。",
+    "请严格结合下面的质量标准一起生成，目标是一次通过系统自检：",
+    buildPromptGenerationQualityCriteria(target),
   ];
 
   if (includeImageContext) {
@@ -539,22 +700,22 @@ function buildAiUserContentV2(result, imageUrls, options = {}) {
     lines.push("- 不要出现图片分析、成图说明、镜头语言、画面风格等图片相关内容。");
     lines.push("- rewrite_prompt 必须整体包在一个 markdown 代码块里返回，前端只原样展示，不做额外排版。");
     lines.push("- 被分析的原笔记只允许参考它的钩子写法、造句手法、语气、笔风、结构节奏和信息组织方式，不允许沿用其中的具体景点、人、物、店名、路线节点、美食名称、价格、时间等细节。");
-    lines.push(`- 最终生文模板必须直接使用固定地点变量 ${WORKFLOW_TEMPLATE_VARIABLES.locationContext}，不能改成别的字段名，不能写成具体城市名。`);
-    lines.push(`- 标题、正文、标签都必须围绕地点变量 ${WORKFLOW_TEMPLATE_VARIABLES.locationContext} 生成：标题要体现该地点/城市的核心吸引点，正文内容要根据该地点展开，标签也要包含该地点对应的城市/地区类关键词。`);
-    lines.push(`- 当地点变量 ${WORKFLOW_TEMPLATE_VARIABLES.locationContext} 的值变化时，标题、正文、标签内容也必须跟着变化；禁止在模板里写死“北京”“上海”“珠海”这类具体城市。`);
-    lines.push(`- 可以把地点变量 ${WORKFLOW_TEMPLATE_VARIABLES.locationContext} 直接写进标题模板、正文模板和标签模板中，作为生成时的唯一城市输入依据。`);
-    lines.push(`- 生成内容时要围绕地点变量 ${WORKFLOW_TEMPLATE_VARIABLES.locationContext} 对应城市主动补充该地的地标、景区、攻略、路线、打卡点、美食、交通、小贴士等本地内容模块，但这些内容必须来自当前地点本身，而不是来自被分析笔记里的原始细节。`);
-    lines.push(`- 允许模型主动联网搜索地点变量 ${WORKFLOW_TEMPLATE_VARIABLES.locationContext} 对应城市的最新景点、攻略、路线、美食和打卡信息，再按原笔记的表达方式重新组织成内容。`);
+    lines.push(`- 最终生文模板必须直接使用固定用户输入变量 ${WORKFLOW_TEMPLATE_VARIABLES.locationContext}，不能改成别的字段名，不能写成具体城市名。`);
+    lines.push(`- 标题、正文、标签都必须围绕用户输入变量 ${WORKFLOW_TEMPLATE_VARIABLES.locationContext} 生成：标题要体现该地点/城市的核心吸引点，正文内容要根据该地点展开，标签也要包含该地点对应的城市/地区类关键词。`);
+    lines.push(`- 当用户输入变量 ${WORKFLOW_TEMPLATE_VARIABLES.locationContext} 的值变化时，标题、正文、标签内容也必须跟着变化；禁止在模板里写死“北京”“上海”“珠海”这类具体城市。`);
+    lines.push(`- 可以把用户输入变量 ${WORKFLOW_TEMPLATE_VARIABLES.locationContext} 直接写进标题模板、正文模板和标签模板中，作为生成时的唯一城市输入依据。`);
+    lines.push(`- 生成内容时要围绕用户输入变量 ${WORKFLOW_TEMPLATE_VARIABLES.locationContext} 对应城市主动补充该地的地标、景区、攻略、路线、打卡点、美食、交通、小贴士等本地内容模块，但这些内容必须来自当前地点本身，而不是来自被分析笔记里的原始细节。`);
+    lines.push(`- 允许模型主动联网搜索用户输入变量 ${WORKFLOW_TEMPLATE_VARIABLES.locationContext} 对应城市的最新景点、攻略、路线、美食和打卡信息，再按原笔记的表达方式重新组织成内容。`);
     lines.push("- 不要输出拆解过程、分析说明、bullet 解释或中间推理，只输出最终模板成品。");
     lines.push("- 最终模板必须结构化显示，每个模块单独成段，使用“模块名”+换行+“---”+换行+模块内容的形式。");
     lines.push("- 固定输出这些模块，顺序不能改：标题要求、开头钩子、正文结构、高频元素、结尾动作、标签策略、写作限制。");
     lines.push("- 每个模块都要直接写给其他 AI 的可执行要求，不要写“分析如下”“原文体现了”这类说明句。");
-    lines.push(`- 标题要求要明确标题写法、字数建议、关键词组织方式，并说明标题如何结合地点变量 ${WORKFLOW_TEMPLATE_VARIABLES.locationContext} 生成。`);
+    lines.push(`- 标题要求要明确标题写法、字数建议、关键词组织方式，并说明标题如何结合用户输入变量 ${WORKFLOW_TEMPLATE_VARIABLES.locationContext} 生成。`);
     lines.push("- 开头钩子要明确开场句式、情绪强度和进入主题的方式。");
-    lines.push(`- 正文结构要明确内容分段逻辑、展开顺序和每段承担的作用，并说明正文如何根据地点变量 ${WORKFLOW_TEMPLATE_VARIABLES.locationContext} 自动生成该地的景区介绍、游玩攻略、路线安排、打卡建议、美食推荐和实用信息。`);
+    lines.push(`- 正文结构要明确内容分段逻辑、展开顺序和每段承担的作用，并说明正文如何根据用户输入变量 ${WORKFLOW_TEMPLATE_VARIABLES.locationContext} 自动生成该地的景区介绍、游玩攻略、路线安排、打卡建议、美食推荐和实用信息。`);
     lines.push("- 高频元素要明确数字、对比、口语感、标签词、列表感、情绪词等保留方式。");
     lines.push("- 结尾动作要明确如何收束，以及是否引导点赞、收藏、评论、关注或转发。");
-    lines.push(`- 标签策略要明确标签数量、标签类型和标签承担的分发作用，并要求标签中直接体现地点变量 ${WORKFLOW_TEMPLATE_VARIABLES.locationContext} 对应的目的地词。`);
+    lines.push(`- 标签策略要明确标签数量、标签类型和标签承担的分发作用，并要求标签中直接体现用户输入变量 ${WORKFLOW_TEMPLATE_VARIABLES.locationContext} 对应的目的地词。`);
     lines.push("- 写作限制要明确哪些能模仿、哪些不能编造、哪些事实必须保持一致，并强调只能模仿写法，不能照搬原笔记里的具体细节。");
     lines.push("- 标签不能只罗列，必须说明标签在关键词覆盖、情绪强化、搜索分发或话题归类上的作用。");
     lines.push("- 不要输出泛化空话，不要把模板写成空泛行业方法论。");
@@ -579,7 +740,7 @@ function buildAiUserContentV2(result, imageUrls, options = {}) {
     lines.push("- 生图方向统一改为“本地生活内容视觉”，不再生成城市地标/景区宣传图。");
     lines.push("- 多图内容方向要优先覆盖这三类本地生活表达：多店饮品 / 环境拼贴海报、高级感咖啡特调特写图、清新治愈 / 自驾松弛风格；具体哪一张对应哪一类，可按参考图的视觉气质做匹配。");
     lines.push("- 如果需要体现地点差异，必须写成“地点驱动的本地生活映射规则”，而不是写死某个城市。");
-    lines.push(`- 最终 prompt 必须能读取地点变量 ${WORKFLOW_TEMPLATE_VARIABLES.imageLocationContext}：当地点变化时，自动映射为该地常见的本地生活线索，如街区商圈、咖啡馆聚集区、饮品门店氛围、可到达的轻出行路线、适合松弛停留的环境气质；但构图骨架、镜头关系和氛围逻辑仍保持与参考图一致。`);
+    lines.push(`- 最终 prompt 必须能读取图片信息变量 ${WORKFLOW_TEMPLATE_VARIABLES.imageLocationContext}：当变量变化时，自动映射为对应的本地生活线索，如街区商圈、咖啡馆聚集区、饮品门店氛围、可到达的轻出行路线、适合松弛停留的环境气质；但构图骨架、镜头关系和氛围逻辑仍保持与参考图一致。`);
     lines.push("- 地点映射要强调“同类替换”原则：替换的是本地生活语境与地域氛围，不替换构图逻辑、光线逻辑、主体摆放逻辑和画面节奏。");
     lines.push("- 多张图之间必须体现“同城本地生活组图”规则：可以分别生成多店饮品氛围、咖啡特调特写、松弛感出行或治愈系环境表达，但不要重复完全相同的画面任务。");
     lines.push("- 风格上严格参考笔记配图的视觉语法，例如构图、机位、色调、光线、质感和氛围；但内容目标改为本地生活相关表达。");
@@ -645,7 +806,7 @@ function buildDynamicImagePromptFixedPrefix(styleCount = IMAGE_PROMPT_REFERENCE_
     `- 生成图片数量：${safeCount} 张，${safeCount}种风格各生成1张`,
     `- 图片比例：${ratioText}`,
     "- 输出要求：每张图独立风格，不混合、不简化，统一视觉调性；**图片中不得出现任何文字、LOGO、标签、贴纸类元素**；**强化真实生活感，弱化AI合成感**",
-    `- 城市输入：优先读取地点变量“${vars.imageLocationContext}”，将同一套构图骨架映射到该城市的多个代表性地标、景区或城市名片场景`,
+    `- 城市输入：优先读取图片信息变量“${vars.imageLocationContext}”，将同一套构图骨架映射到该城市的多个代表性地标、景区或城市名片场景`,
     `- 风格参考输入：解析图列表统一引用“${vars.imageList}”，只复用配图风格，不复用原图主体`,
     "- 主体生成规则：每张图都要生成当前城市的不同地标/景区主体，主体内容必须随城市变化，不得重复同一个地标",
   ];
@@ -809,6 +970,7 @@ function buildFixedImageGenerationTemplate(visualStyleContent, result = null, in
     "   - 场景融合：参考图核心布局不变，风格/色调/光影/氛围与描述完全匹配，融合无割裂感",
     "   - 画质要求：高清（分辨率≥1200×1600）、无噪点、无压缩失真",
     "   - 格式要求：3:4竖图比例，数量1-5张",
+    "   - 生图类同：保证每个生成图之间都有一定的差异性，确保生成图片的丰富性",
     "   - 约束优先级：参考图主体/布局保留 > 风格细节匹配 > 画质输出",
   ].join("\n");
 }
@@ -1228,7 +1390,7 @@ function buildDynamicImageTypographyLine(analysis, serial) {
 
 function buildDynamicLocationMappingLine(serial) {
   const locationVar = WORKFLOW_TEMPLATE_VARIABLES.imageLocationContext;
-  return `读取地点变量“${locationVar}”，保持当前画面的构图、机位、空间层次和氛围逻辑不变，将内容目标映射为该城市的本地生活语境，例如商圈街区、门店氛围、饮品消费场景、咖啡特调表达、周边轻出行和松弛停留方式；多张图需覆盖同城不同的本地生活切面，避免重复同一种表达。`;
+  return `读取图片信息变量“${locationVar}”，保持当前画面的构图、机位、空间层次和氛围逻辑不变，将内容目标映射为该城市的本地生活语境，例如商圈街区、门店氛围、饮品消费场景、咖啡特调表达、周边轻出行和松弛停留方式；多张图需覆盖同城不同的本地生活切面，避免重复同一种表达。`;
 }
 
 function buildDynamicImagePromptCodeBlock(serial, styleName, ratioLabel, analysis, sceneType, result = null) {
@@ -1244,7 +1406,7 @@ function buildDynamicImagePromptCodeBlock(serial, styleName, ratioLabel, analysi
   const negativeRule = "禁止出现任何新增文字、LOGO、标签、贴纸、二维码、错误品牌信息、乱码、水印和无关装饰元素，同时避免AI感过强、塑料感、结构错误、边缘发虚、材质失真、过度锐化和画面假干净。";
 
   return [
-    `**生成目标：** 请生成一张${sceneType}的${styleName}${direction.label}，主体方向由地点变量 ${WORKFLOW_TEMPLATE_VARIABLES.imageLocationContext} 决定。`,
+    `**生成目标：** 请生成一张${sceneType}的${styleName}${direction.label}，主体方向由图片信息变量 ${WORKFLOW_TEMPLATE_VARIABLES.imageLocationContext} 决定。`,
     `**场景主体：** ${direction.subjectHint}；${subjectLine}。不要复写参考图中的特定物体、品牌或具体场景细节，只保留可迁移的主体关系与视觉角色。`,
     `**城市映射：** ${locationMapping}`,
     `**构图与镜头：** ${composition}。`,
@@ -1260,10 +1422,10 @@ function buildDynamicImagePromptCodeBlock(serial, styleName, ratioLabel, analysi
 }
 async function generatePromptsWithAi(result, options = {}) {
   if (AI_PROVIDER === "grobotai") {
-    return generatePromptsWithQualityGate("grobotai", result, options, generatePromptsWithGrobotaiCore);
+    return generatePromptsWithGrobotaiCore(result, options);
   }
 
-  return generatePromptsWithQualityGate("ai", result, options, generatePromptsWithAiCore);
+  return generatePromptsWithAiCore(result, options);
 }
 
 async function generatePromptsWithAiCore(result, options = {}) {
@@ -1298,8 +1460,8 @@ async function generatePromptsWithAiCore(result, options = {}) {
     payload.model = AI_API_MODEL;
   }
 
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), resolvePromptRequestTimeoutMs(target));
+  const timeoutMs = resolvePromptRequestTimeoutMs(target);
+  const { controller, timeoutId } = createTimeoutController(timeoutMs, "提示词生成请求");
   const responseFormats = buildAiResponseFormatCandidates(target);
 
   try {
@@ -1372,10 +1534,11 @@ async function generatePromptsWithAiCore(result, options = {}) {
     };
     */
   } catch (error) {
+    const normalizedError = normalizeTimeoutError(error, "提示词生成请求", timeoutMs);
     if (error && typeof error === "object") {
-      error.debugMessages = target === "image" ? [] : payload.messages;
+      normalizedError.debugMessages = target === "image" ? [] : payload.messages;
     }
-    throw error;
+    throw normalizedError;
   } finally {
     clearTimeout(timeoutId);
   }
@@ -1429,8 +1592,8 @@ async function generatePromptsWithGrobotaiCore(result, options = {}) {
     temperature: 0.2,
   };
 
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), resolvePromptRequestTimeoutMs(target));
+  const timeoutMs = resolvePromptRequestTimeoutMs(target);
+  const { controller, timeoutId } = createTimeoutController(timeoutMs, "提示词生成请求");
   const responseFormats = buildAiResponseFormatCandidates(target);
 
   try {
@@ -1492,18 +1655,19 @@ async function generatePromptsWithGrobotaiCore(result, options = {}) {
 
     throw lastError || new Error("AI prompt generation failed.");
   } catch (error) {
+    const normalizedError = normalizeTimeoutError(error, "提示词生成请求", timeoutMs);
     if (error && typeof error === "object") {
-      error.debugMessages =
+      normalizedError.debugMessages =
         target === "image"
           ? [
               ...imageDebugMessages,
               "阶段 2/2：生图提示词生成失败",
               `请求接口：${endpointUrl}`,
-              `失败原因：${error instanceof Error ? error.message : "未知错误"}`,
+              `失败原因：${normalizedError instanceof Error ? normalizedError.message : "未知错误"}`,
             ]
           : payload.messages;
     }
-    throw error;
+    throw normalizedError;
   } finally {
     clearTimeout(timeoutId);
   }
@@ -1527,6 +1691,7 @@ async function generatePromptsWithQualityGate(providerName, result, options, req
       : buildFallbackPromptReview(target, generated, result, currentOptions, selfTest);
     const mergedMessages = [
       ...ensureDebugMessageArray(generated.debugMessages),
+      ...buildGeneratedPromptDebugMessages(generated, target),
       ...buildPromptSelfCheckDebugMessages(attempt, maxRounds, review, target),
     ];
 
@@ -1542,11 +1707,31 @@ async function generatePromptsWithQualityGate(providerName, result, options, req
       const error = new Error(buildPromptQualityFailureMessage(review, target, providerName));
       error.debugMessages = mergedMessages;
       error.qualityReview = review;
+      error.generatedPrompts = {
+        rewritePrompt: String(generated?.rewritePrompt || ""),
+        imagePrompt: String(generated?.imagePrompt || ""),
+      };
       throw error;
     }
 
     currentOptions = buildPromptRetryOptions(currentOptions, review, target);
   }
+}
+
+function buildGeneratedPromptDebugMessages(generated, target) {
+  const messages = [];
+
+  if (target !== "image") {
+    const rewritePrompt = String(generated?.rewritePrompt || "").trim();
+    messages.push(`rewrite_prompt 预览：${truncateErrorText(rewritePrompt, 220) || "-"}`);
+  }
+
+  if (target !== "rewrite") {
+    const imagePrompt = String(generated?.imagePrompt || "").trim();
+    messages.push(`image_prompt 预览：${truncateErrorText(imagePrompt, 220) || "-"}`);
+  }
+
+  return messages;
 }
 
 function buildPromptRetryOptions(options, review, target) {
@@ -1698,6 +1883,329 @@ function normalizeSelfTestContext(value) {
   };
 }
 
+async function executePromptSelfTest(result, generated, selfTest) {
+  if (!isAiPromptConfigured()) {
+    throw new Error("AI 服务尚未配置，无法执行自测生成。");
+  }
+
+  const resolvedRewritePrompt = materializePromptTemplate(generated?.rewritePrompt, selfTest);
+  const resolvedImagePrompt = materializePromptTemplate(generated?.imagePrompt, selfTest);
+  const rewriteOutput = await generateRewriteSelfTestOutput(result, resolvedRewritePrompt);
+  const imageGeneration = await tryGenerateImageSelfTestOutput(resolvedImagePrompt, selfTest);
+
+  return {
+    statusText: "完成",
+    summary: buildSelfTestExecutionSummary(rewriteOutput, resolvedImagePrompt, imageGeneration),
+    rewriteOutput: formatResolvedRewriteSelfTestOutput(resolvedRewritePrompt, rewriteOutput),
+    imageOutput: resolvedImagePrompt || "-",
+    generatedImages: imageGeneration.images,
+    imageError: imageGeneration.error,
+  };
+}
+
+function formatResolvedRewriteSelfTestOutput(resolvedRewritePrompt, rewriteOutput) {
+  const resolved = String(resolvedRewritePrompt || "").trim();
+  const generated = String(rewriteOutput || "").trim();
+
+  if (resolved && generated) {
+    return [
+      "【变量代入后的生文 Prompt】",
+      resolved,
+      "",
+      "【按该 Prompt 生成的生文结果】",
+      generated,
+    ].join("\n");
+  }
+
+  return generated || resolved || "-";
+}
+
+function materializePromptTemplate(templateText, selfTest) {
+  const normalized = unwrapMarkdownCodeBlock(String(templateText || "").trim());
+  if (!normalized) {
+    return "";
+  }
+
+  const productImageList = Array.isArray(selfTest?.imageDataUrls) ? selfTest.imageDataUrls : [];
+  const productImagePlaceholderList = buildSelfTestImagePlaceholderList(productImageList);
+  const replacements = [
+    [WORKFLOW_TEMPLATE_VARIABLES.locationContext, String(selfTest?.location || "").trim() || "未提供用户输入变量"],
+    [WORKFLOW_TEMPLATE_VARIABLES.imageLocationContext, String(selfTest?.imageInfo || "").trim() || "未提供图片信息变量"],
+    [WORKFLOW_TEMPLATE_VARIABLES.productImageList, productImagePlaceholderList || "未提供产品图片"],
+    [WORKFLOW_TEMPLATE_VARIABLES.imageList, productImagePlaceholderList || "未提供测试图片"],
+    [WORKFLOW_TEMPLATE_VARIABLES.firstImage, productImageList.length ? "测试图片1" : "未提供测试图片"],
+  ];
+
+  let next = normalized;
+  replacements.forEach(([token, value]) => {
+    next = next.split(token).join(value);
+  });
+  return next.trim();
+}
+
+function buildSelfTestImagePlaceholderList(imageUrls = []) {
+  const total = Array.isArray(imageUrls) ? imageUrls.length : 0;
+  if (!total) {
+    return "";
+  }
+
+  return Array.from({ length: total }, (_, index) => `测试图片${index + 1}`).join("、");
+}
+
+async function generateRewriteSelfTestOutput(result, resolvedPrompt) {
+  const template = String(resolvedPrompt || "").trim();
+  if (!template) {
+    return "";
+  }
+
+  const endpointUrl = AI_PROVIDER === "grobotai" ? buildGrobotaiPromptUrl() : buildAiEndpointUrl();
+  const headers = AI_PROVIDER === "grobotai" ? buildGrobotaiRequestHeaders() : buildAiRequestHeaders();
+  const requestPayload = {
+    model: AI_API_MODEL,
+    temperature: 0.4,
+    messages: [
+      {
+        role: "system",
+        content: [
+          "你是一个执行写作模板的助手。",
+          "用户会提供一段已经代入变量的仿写提示词，请直接根据提示词产出最终成稿。",
+          "只输出最终成稿，不要解释执行过程，不要输出 JSON。",
+        ].join("\n"),
+      },
+      {
+        role: "user",
+        content: [
+          `原笔记标题：${String(result?.title || "").trim() || "-"}`,
+          `原笔记正文：${String(result?.body || "").trim() || "-"}`,
+          `原笔记标签：${
+            Array.isArray(result?.tags) ? result.tags.map((tag) => String(tag || "").trim()).filter(Boolean).join("、") : "-"
+          }`,
+          "",
+          "请严格执行下面这段仿写提示词模板，直接输出最终文案：",
+          template,
+        ].join("\n"),
+      },
+    ],
+  };
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), Math.max(30000, AI_REQUEST_TIMEOUT_MS));
+
+  try {
+    const response = await fetch(endpointUrl, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(requestPayload),
+      signal: controller.signal,
+    });
+    const rawText = await response.text();
+    if (!response.ok) {
+      throw new Error(`生文自测执行失败：${response.status} ${truncateErrorText(rawText)}`);
+    }
+
+    const parsed = parseAiResponsePayload(rawText);
+    const content = extractAiMessageContent(parsed);
+    return String(content || "").trim();
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+function buildSelfTestExecutionSummary(rewriteOutput, resolvedImagePrompt, imageGeneration = { images: [], error: "" }) {
+  const rewriteReady = String(rewriteOutput || "").trim();
+  const imageReady = String(resolvedImagePrompt || "").trim();
+  const generatedImages = Array.isArray(imageGeneration?.images) ? imageGeneration.images : [];
+  const imageError = String(imageGeneration?.error || "").trim();
+
+  if (rewriteReady && generatedImages.length) {
+    return `已完成变量代入，生成了生文自测结果，并成功产出 ${generatedImages.length} 张测试图片。`;
+  }
+
+  if (rewriteReady && imageReady && imageError) {
+    return `已完成变量代入，并生成了生文自测结果；测试图片暂未生成：${imageError}`;
+  }
+
+  if (rewriteReady && imageReady) {
+    return "已完成变量代入，并生成了生文自测结果与生图最终 Prompt。";
+  }
+
+  if (rewriteReady) {
+    return "已完成变量代入，并生成了生文自测结果。";
+  }
+
+  if (imageReady) {
+    return "已完成变量代入，并整理出生图最终 Prompt。";
+  }
+
+  return "自测已执行，但未生成可展示结果。";
+}
+
+async function tryGenerateImageSelfTestOutput(resolvedImagePrompt, selfTest = {}) {
+  const prompt = sanitizeImageSelfTestPrompt(resolvedImagePrompt);
+  if (!prompt) {
+    return { images: [], error: "当前生图模板为空，无法生成测试图片。" };
+  }
+
+  const endpointUrl = buildAiImageGenerationUrl();
+  const headers = AI_PROVIDER === "grobotai" ? buildGrobotaiRequestHeaders() : buildAiRequestHeaders();
+  const uploadedImageUrls = Array.isArray(selfTest?.imageDataUrls)
+    ? selfTest.imageDataUrls.map((item) => String(item || "").trim()).filter(Boolean)
+    : [];
+  const imageUrlList = uploadedImageUrls.length ? uploadedImageUrls : extractImageUrlsFromPrompt(prompt);
+  const outputImageCount = resolveImageSelfTestCount(prompt);
+  const requestPayload =
+    AI_PROVIDER === "grobotai"
+      ? {
+          image_url_list: imageUrlList,
+          prompt,
+          model: AI_IMAGE_MODEL || AI_API_MODEL,
+          size: AI_IMAGE_SIZE,
+          max_images: outputImageCount,
+          prompt_mode: AI_IMAGE_PROMPT_MODE,
+        }
+      : {
+          model: AI_IMAGE_MODEL || AI_API_MODEL,
+          prompt,
+          size: AI_IMAGE_SIZE,
+          n: outputImageCount,
+        };
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), Math.max(45000, AI_IMAGE_REQUEST_TIMEOUT_MS));
+
+  try {
+    const response = await fetch(endpointUrl, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(requestPayload),
+      signal: controller.signal,
+    });
+    const rawText = await response.text();
+    if (!response.ok) {
+      return {
+        images: [],
+        error: `生图接口不可用：${response.status} ${truncateErrorText(rawText)}`,
+      };
+    }
+
+    const payload = tryParseJson(rawText);
+    const images = extractGeneratedImageUrls(payload);
+    if (images.length) {
+      return {
+        images,
+        error: "",
+      };
+    }
+
+    return {
+      images: [],
+      error: "生图接口已返回，但未解析到图片地址。",
+    };
+  } catch (error) {
+    return {
+      images: [],
+      error: error instanceof Error ? error.message : "生图测试失败。",
+    };
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+function sanitizeImageSelfTestPrompt(promptText) {
+  return String(promptText || "")
+    .replace(/data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=]+/g, "[测试图片数据]")
+    .replace(/\bhttps?:\/\/[^\s)\]}>"'`]+/g, "[测试图片链接]")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function extractGeneratedImageUrls(payload) {
+  if (!payload || typeof payload !== "object") {
+    return [];
+  }
+
+  const directList =
+    Array.isArray(payload?.data?.image_info_list) ? payload.data.image_info_list : Array.isArray(payload.data) ? payload.data : [];
+  const urls = [];
+
+  directList.forEach((item) => {
+    const directUrl = typeof item?.url === "string" ? item.url.trim() : "";
+    if (directUrl) {
+      urls.push(directUrl);
+      return;
+    }
+
+    const b64 = typeof item?.b64_json === "string" ? item.b64_json.trim() : "";
+    if (b64) {
+      urls.push(`data:image/png;base64,${b64}`);
+    }
+  });
+
+  return urls.filter(Boolean);
+}
+
+function resolveImageSelfTestCount(promptText) {
+  const prompt = unwrapMarkdownCodeBlock(promptText);
+  const rangePatterns = [
+    /数量\s*[:：]?\s*(\d+)\s*[-~至到]\s*(\d+)\s*张/gi,
+    /输出\s*[:：]?\s*(\d+)\s*[-~至到]\s*(\d+)\s*张/gi,
+    /生成\s*[:：]?\s*(\d+)\s*[-~至到]\s*(\d+)\s*张/gi,
+    /(\d+)\s*[-~至到]\s*(\d+)\s*张/gi,
+  ];
+  const exactPatterns = [
+    /数量\s*[:：]?\s*(\d+)\s*张/gi,
+    /输出\s*[:：]?\s*(\d+)\s*张/gi,
+    /生成\s*[:：]?\s*(\d+)\s*张/gi,
+    /建议\s*(\d+)\s*张/gi,
+  ];
+
+  for (const pattern of rangePatterns) {
+    const match = pattern.exec(prompt);
+    if (!match) {
+      continue;
+    }
+
+    const upper = Number.parseInt(match[2], 10);
+    if (Number.isFinite(upper) && upper > 0) {
+      return Math.min(Math.max(1, upper), AI_IMAGE_MAX_IMAGES);
+    }
+  }
+
+  for (const pattern of exactPatterns) {
+    const match = pattern.exec(prompt);
+    if (!match) {
+      continue;
+    }
+
+    const count = Number.parseInt(match[1], 10);
+    if (Number.isFinite(count) && count > 0) {
+      return Math.min(Math.max(1, count), AI_IMAGE_MAX_IMAGES);
+    }
+  }
+
+  return Math.min(Math.max(1, AI_IMAGE_MAX_IMAGES), 5);
+}
+
+function extractImageUrlsFromPrompt(prompt) {
+  const urls = [];
+  const text = String(prompt || "");
+  const patterns = [
+    /https?:\/\/[^\s)\]}>"'`]+/g,
+    /data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=]+/g,
+  ];
+
+  patterns.forEach((pattern) => {
+    const matches = text.match(pattern) || [];
+    matches.forEach((match) => {
+      const clean = String(match || "").trim();
+      if (clean) {
+        urls.push(clean);
+      }
+    });
+  });
+
+  return [...new Set(urls)];
+}
+
 function buildFallbackPromptReview(target, generated, result, options) {
   const rewriteText = unwrapMarkdownCodeBlock(generated?.rewritePrompt || "");
   const imageText = unwrapMarkdownCodeBlock(generated?.imagePrompt || "");
@@ -1712,11 +2220,28 @@ function buildFallbackPromptReview(target, generated, result, options) {
 
   const rewrite = assessPromptTextQuality("rewrite", rewriteText, result, options);
   const image = assessPromptTextQuality("image", imageText, result, options);
+
+  // 构建详细的回退审查信息
+  let summary = "已使用本地硬规则回退评分。";
+  const issues = [];
+
+  if (!rewrite.pass) {
+    issues.push(`仿写提示词未通过：${rewrite.issues.join("；")}`);
+  }
+
+  if (!image.pass) {
+    issues.push(`生图提示词未通过：${image.issues.join("；")}`);
+  }
+
+  if (issues.length > 0) {
+    summary = `${summary} ${issues.join("；")}`;
+  }
+
   return {
     pass: Boolean(rewrite.pass && image.pass),
     rewrite,
     image,
-    summary: "已使用本地硬规则回退评分。",
+    summary: summary,
   };
 }
 
@@ -1737,11 +2262,8 @@ async function reviewGeneratedPrompts(providerName, result, options, generated, 
     selfTestImageAnalyses
   );
   const requestModel = AI_API_MODEL;
-  const controller = new AbortController();
-  const timeoutId = setTimeout(
-    () => controller.abort(),
-    Math.max(30000, Math.min(resolvePromptRequestTimeoutMs(target), 60000))
-  );
+  const timeoutMs = Math.max(30000, Math.min(resolvePromptRequestTimeoutMs(target), 60000));
+  const { controller, timeoutId } = createTimeoutController(timeoutMs, "提示词自检请求");
   const responseFormats = buildPromptReviewResponseFormats(target);
 
   try {
@@ -1793,6 +2315,11 @@ async function reviewGeneratedPrompts(providerName, result, options, generated, 
 
     throw lastError || new Error("Prompt review failed.");
   } catch (error) {
+    const normalizedError = normalizeTimeoutError(error, "提示词自检请求", timeoutMs);
+    if (isAbortLikeError(normalizedError)) {
+      throw normalizedError;
+    }
+
     return buildFallbackPromptReview(target, generated, result, options, selfTest);
   } finally {
     clearTimeout(timeoutId);
@@ -1828,8 +2355,8 @@ function buildPromptReviewPayload(
     `- imageInstruction: ${String(options.imageInstruction || options.imageDirection || "").trim() || "-"}`,
     "",
     "自测输入：",
-    `- 地点变量: ${String(selfTest?.location || "").trim() || "-"}`,
-    `- 图片说明: ${String(selfTest?.imageInfo || "").trim() || "-"}`,
+    `- 用户输入变量: ${String(selfTest?.location || "").trim() || "-"}`,
+    `- 图片信息变量: ${String(selfTest?.imageInfo || "").trim() || "-"}`,
     `- 自测图片数量: ${Array.isArray(selfTest?.imageDataUrls) ? selfTest.imageDataUrls.length : 0}`,
     "",
     "生成结果：",
@@ -1868,19 +2395,31 @@ function buildPromptReviewPayload(
 
 function buildPromptReviewSystemPrompt(target) {
   const lines = [
-    "你是提示词质量审查员，只负责判卷，不负责展开写作。",
-    "你的任务是检查提示词是否足够像原笔记/参考图的风格，并判断是否足够像素人实拍、真实摄影、可直接投喂。",
-    "只输出 JSON，不要输出解释文字。",
-    "评分标准：100 分满分，80 分以上才算通过；如果明显跑题、空泛、缺结构或缺真实实拍感，必须判不通过。",
+    "你是专业的提示词质量审查员，负责客观、全面地评估AI生成的提示词模板质量。",
+    "请严格按照以下质量标准进行审查，并输出JSON格式的审查结果。",
+    "只输出JSON，不要输出解释文字。",
+    "评分标准：100分满分，82分以上才算通过；如果存在严重问题（如跑题、空泛、结构缺失、缺乏真实感等），必须判不通过。",
   ];
 
   if (target === "rewrite") {
-    lines.push("你只审查 rewrite_prompt。重点看标题策略、正文结构、语气节奏、标签策略、写作限制、地点变量是否明确。");
+    lines.push("你只审查 rewrite_prompt（仿写提示词）。审查重点包括：");
+    lines.push("1. 明确性：目标是否清晰，是否有明确的结构要求");
+    lines.push("2. 完整性：是否包含标题要求、开头钩子、正文结构、高频元素、结尾动作、标签策略、写作限制等必要模块");
+    lines.push("3. 精确性：用户输入变量是否正确使用，是否有明确的写作约束");
+    lines.push("4. 实用性：是否能直接被其他AI使用，是否有明确的仿写指导");
+    lines.push("5. 一致性：风格是否与原笔记相符，是否保持真实感");
   } else if (target === "image") {
-    lines.push("你只审查 image_prompt。重点看真实实拍感、视觉语言贴合度、构图/光线/色彩/材质是否具体，以及是否能直接投喂生图模型。");
+    lines.push("你只审查 image_prompt（生图提示词）。审查重点包括：");
+    lines.push("1. 明确性：是否有明确的视觉风格、构图、光线、色彩要求");
+    lines.push("2. 完整性：是否包含真实实拍要求、摄影参数、画面质感、比例、氛围等必要信息");
+    lines.push("3. 精确性：图片信息变量是否正确使用，是否有明确的负面限制");
+    lines.push("4. 实用性：是否能直接被生图AI使用，是否有具体的视觉描述");
+    lines.push("5. 一致性：风格是否与参考图相符，是否保持真实摄影感");
     lines.push("如果提供了自测图片样本，请把它们视为判卷基准，判断生成结果是否足够接近样本的实拍质感与镜头逻辑。");
   } else {
     lines.push("你同时审查 rewrite_prompt 和 image_prompt，分别打分，再给出总评。");
+    lines.push("rewrite_prompt 审查重点：明确性、完整性、精确性、实用性、一致性");
+    lines.push("image_prompt 审查重点：明确性、完整性、精确性、实用性、一致性");
   }
 
   return lines.join("\n");
@@ -2020,11 +2559,11 @@ function assessPromptTextQuality(target, promptText, result, options) {
     const hitCount = requiredMarkers.filter((marker) => normalizedText.includes(marker)).length;
 
     if (hitCount < 5) {
-      issues.push("rewrite_prompt 的结构模块不够完整。");
+      issues.push("rewrite_prompt 的结构模块不够完整，应包含标题要求、开头钩子、正文结构、高频元素、结尾动作、标签策略、写作限制等模块。");
     }
 
     if (!normalizedText.includes(WORKFLOW_TEMPLATE_VARIABLES.locationContext)) {
-      issues.push("rewrite_prompt 没有稳定使用地点变量。");
+      issues.push("rewrite_prompt 没有稳定使用用户输入变量。");
     }
 
     if (!/仿写|生文|提示词/.test(normalizedText)) {
@@ -2036,15 +2575,15 @@ function assessPromptTextQuality(target, promptText, result, options) {
     }
   } else {
     if (!normalizedText.includes(WORKFLOW_TEMPLATE_VARIABLES.imageLocationContext)) {
-      issues.push("image_prompt 没有稳定使用地点变量。");
+      issues.push("image_prompt 没有稳定使用图片信息变量。");
     }
 
     if (!/真实拍摄|实拍|真实摄影|素人实拍|实景/.test(normalizedText)) {
-      issues.push("image_prompt 的实拍感描述不够明确。");
+      issues.push("image_prompt 的实拍感描述不够明确，应包含真实拍摄要求。");
     }
 
     if (!/构图|光线|色彩|质感|镜头|氛围/.test(normalizedText)) {
-      issues.push("image_prompt 的视觉要素太少，缺少可执行的画面语言。");
+      issues.push("image_prompt 的视觉要素太少，缺少可执行的画面语言，应包含构图、光线、色彩、质感、镜头、氛围等要素。");
     }
 
     if (!/提示词|prompt|成图/.test(normalizedText)) {
@@ -2105,6 +2644,10 @@ function normalizePositiveInteger(value, fallback) {
 
 function buildAiEndpointUrl() {
   return new URL(AI_CHAT_COMPLETIONS_PATH, AI_API_BASE_URL).toString();
+}
+
+function buildAiImageGenerationUrl() {
+  return new URL(AI_IMAGE_GENERATIONS_PATH, AI_API_BASE_URL).toString();
 }
 
 function resolvePromptRequestTimeoutMs(target) {
@@ -2624,8 +3167,7 @@ async function requestVisionAnalyses(endpointUrl, headers, imageUrls) {
     payload.model = AI_VISION_MODEL;
   }
 
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), AI_VISION_TIMEOUT_MS);
+  const { controller, timeoutId } = createTimeoutController(AI_VISION_TIMEOUT_MS, "参考图分析请求");
 
   try {
     let lastError = null;
@@ -2667,6 +3209,8 @@ async function requestVisionAnalyses(endpointUrl, headers, imageUrls) {
     }
 
     throw lastError || new Error("Vision analysis returned empty result.");
+  } catch (error) {
+    throw normalizeTimeoutError(error, "参考图分析请求", AI_VISION_TIMEOUT_MS);
   } finally {
     clearTimeout(timeoutId);
   }
@@ -3460,28 +4004,28 @@ function ensureImagePromptLocationVariable(value) {
   if (/\*\*生成目标：\*\*/.test(next)) {
     next = next.replace(
       /\*\*生成目标：\*\*\s*/g,
-      `**生成目标：** 请围绕固定地点变量 ${locationVar} 生成城市地标/景区系列图。`
+      `**生成目标：** 请围绕固定图片信息变量 ${locationVar} 生成城市地标/景区系列图。`
     );
   }
 
   if (/\*\*场景主体：\*\*/.test(next)) {
     next = next.replace(
       /\*\*场景主体：\*\*\s*/g,
-      `**场景主体：** 根据地点变量 ${locationVar} 动态替换为该城市的代表性地标、景区或城市名片场景。`
+      `**场景主体：** 根据图片信息变量 ${locationVar} 动态替换为该城市的代表性地标、景区或城市名片场景。`
     );
   }
 
   if (/\*\*城市映射：\*\*/.test(next)) {
     next = next.replace(
       /\*\*城市映射：\*\*\s*/g,
-      `**城市映射：** 读取地点变量 ${locationVar}，保持构图逻辑、镜头关系和氛围节奏不变，只替换为该地点对应的城市地标/景区。`
+      `**城市映射：** 读取图片信息变量 ${locationVar}，保持构图逻辑、镜头关系和氛围节奏不变，只替换为该地点对应的城市地标/景区。`
     );
   }
 
   if (!/\*\*城市映射：\*\*/.test(next)) {
     next = next.replace(
       /(图[一二三四五六七八九十]+\s*\n---\s*)/g,
-      `$1**城市映射：** 读取地点变量 ${locationVar}，保持构图逻辑、镜头关系和氛围节奏不变，只替换为该地点对应的城市地标/景区。\n\n`
+      `$1**城市映射：** 读取图片信息变量 ${locationVar}，保持构图逻辑、镜头关系和氛围节奏不变，只替换为该地点对应的城市地标/景区。\n\n`
     );
   }
 
