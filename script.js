@@ -3,6 +3,7 @@ const urlInput = document.querySelector("#note-url");
 const submitButton = document.querySelector("#submit-button");
 const historyButton = document.querySelector("#history-button");
 const historyMenu = document.querySelector("#history-menu");
+const parseLinksBlock = document.querySelector("#parse-links-block");
 const emptyState = document.querySelector("#empty-state");
 const resultCard = document.querySelector("#result-card");
 const resultImage = document.querySelector("#result-image");
@@ -35,14 +36,21 @@ const selftestImageInfoValue = document.querySelector("#selftest-image-info-valu
 const selftestImageCountValue = document.querySelector("#selftest-image-count-value");
 const selftestImageList = document.querySelector("#selftest-image-list");
 const selftestStatusValue = document.querySelector("#selftest-status-value");
-const selftestRewriteScoreValue = document.querySelector("#selftest-rewrite-score-value");
-const selftestImageScoreValue = document.querySelector("#selftest-image-score-value");
 const selftestSummaryValue = document.querySelector("#selftest-summary-value");
+const selftestRewriteOutput = document.querySelector("#selftest-rewrite-output");
+const selftestImageOutput = document.querySelector("#selftest-image-output");
+const selftestGeneratedImages = document.querySelector("#selftest-generated-images");
 const resultImagePrompt = document.querySelector("#result-image-prompt");
 const imageMessagesOutput = document.querySelector("#image-messages-output");
 const imageDirectionInput = document.querySelector("#image-direction-input");
 const regenerateImagePromptButton = document.querySelector("#regenerate-image-prompt-button");
 const copyImagePromptButton = document.querySelector("#copy-image-prompt-button");
+const imagePreviewModal = document.querySelector("#image-preview-modal");
+const imagePreviewImage = document.querySelector("#image-preview-image");
+const imagePreviewCaption = document.querySelector("#image-preview-caption");
+const imagePreviewClose = document.querySelector("#image-preview-close");
+const imagePreviewPrev = document.querySelector("#image-preview-prev");
+const imagePreviewNext = document.querySelector("#image-preview-next");
 
 const FALLBACK_IMAGE =
   "https://images.unsplash.com/photo-1517841905240-472988babdf9?auto=format&fit=crop&w=1200&q=80";
@@ -76,6 +84,11 @@ const swipeState = {
   deltaX: 0,
 };
 
+const imagePreviewState = {
+  images: [],
+  index: 0,
+};
+
 let copyPromptResetTimer = 0;
 let copyAllImagesResetTimer = 0;
 let copyImagePromptResetTimer = 0;
@@ -97,6 +110,7 @@ const mediaLinkState = {
 
 warnIfOpenedFromFile();
 renderUrlHistory();
+updateParseLinksActionState();
 syncPromptVariableInputs();
 renderPromptSelfTestSummary();
 setSubmitButtonState("idle");
@@ -167,7 +181,7 @@ window.addEventListener("beforeunload", () => {
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
 
-  const rawUrl = urlInput.value.trim();
+  const rawUrl = sanitizeUrlInputValue(urlInput.value);
   if (!rawUrl) {
     setSubmitButtonState("idle");
     return;
@@ -177,6 +191,7 @@ form.addEventListener("submit", async (event) => {
 
   try {
     noteUrl = normalizeUrl(rawUrl);
+    urlInput.value = noteUrl;
   } catch (error) {
     setSubmitButtonState("idle");
     return;
@@ -208,7 +223,27 @@ urlInput.addEventListener("input", () => {
   resetSubmitButtonForNewInput();
 });
 
+urlInput.addEventListener("paste", (event) => {
+  const pastedText = event.clipboardData?.getData("text");
+  if (!pastedText) {
+    return;
+  }
+
+  const sanitizedValue = sanitizeUrlInputValue(pastedText);
+  if (!sanitizedValue) {
+    return;
+  }
+
+  event.preventDefault();
+  urlInput.value = sanitizedValue;
+  resetSubmitButtonForNewInput();
+});
+
 urlInput.addEventListener("change", () => {
+  const sanitizedValue = sanitizeUrlInputValue(urlInput.value);
+  if (sanitizedValue && sanitizedValue !== urlInput.value) {
+    urlInput.value = sanitizedValue;
+  }
   resetSubmitButtonForNewInput();
 });
 
@@ -253,6 +288,10 @@ copyImagePromptButton.addEventListener("click", async () => {
     flashImagePromptButton("复制失败");
   }
 });
+
+imagePreviewClose?.addEventListener("click", closeImagePreview);
+imagePreviewPrev?.addEventListener("click", () => moveImagePreview(-1));
+imagePreviewNext?.addEventListener("click", () => moveImagePreview(1));
 
 regeneratePromptButton.addEventListener("click", async () => {
   await regenerateRewritePrompt();
@@ -318,6 +357,19 @@ resultImage.addEventListener("touchend", () => {
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     closeHistoryMenu();
+    closeImagePreview();
+  }
+
+  if (!imagePreviewModal?.classList.contains("hidden")) {
+    if (event.key === "ArrowLeft") {
+      moveImagePreview(-1);
+    }
+
+    if (event.key === "ArrowRight") {
+      moveImagePreview(1);
+    }
+
+    return;
   }
 
   if (resultCard.classList.contains("hidden") || carouselState.images.length <= 1) {
@@ -334,6 +386,16 @@ document.addEventListener("keydown", (event) => {
 });
 
 document.addEventListener("click", (event) => {
+  if (
+    imagePreviewModal &&
+    !imagePreviewModal.classList.contains("hidden") &&
+    event.target instanceof HTMLElement &&
+    event.target.dataset.previewDismiss === "true"
+  ) {
+    closeImagePreview();
+    return;
+  }
+
   if (
     historyMenu.classList.contains("hidden") ||
     historyMenu.contains(event.target) ||
@@ -578,6 +640,18 @@ function renderPromptSelfTestSummary() {
       promptImageAssets.forEach((asset, index) => {
         const item = document.createElement("figure");
         item.className = "selftest-summary-thumb";
+        item.tabIndex = 0;
+        item.setAttribute("role", "button");
+        item.setAttribute("aria-label", `预览样本图 ${index + 1}`);
+        item.addEventListener("click", () => {
+          openImagePreview(promptImageAssets.map((entry) => entry.url).filter(Boolean), index);
+        });
+        item.addEventListener("keydown", (event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            openImagePreview(promptImageAssets.map((entry) => entry.url).filter(Boolean), index);
+          }
+        });
 
         const img = document.createElement("img");
         img.src = asset.url;
@@ -594,9 +668,10 @@ function renderPromptSelfTestSummary() {
 
   const run = currentSelfTestRun;
   setSelfTestFieldValue(selftestStatusValue, run?.statusText || "未执行");
-  setSelfTestFieldValue(selftestRewriteScoreValue, run?.rewriteScoreText || "-");
-  setSelfTestFieldValue(selftestImageScoreValue, run?.imageScoreText || "-");
   setSelfTestFieldValue(selftestSummaryValue, run?.summary || "-");
+  setSelfTestFieldValue(selftestRewriteOutput, run?.rewriteOutput || "-");
+  setSelfTestFieldValue(selftestImageOutput, run?.imageOutput || "-");
+  renderSelfTestGeneratedImages(run?.generatedImages, run?.imageError);
 }
 
 function setSelfTestFieldValue(element, value) {
@@ -605,7 +680,109 @@ function setSelfTestFieldValue(element, value) {
   }
 
   const text = String(value || "").trim();
+  if ("value" in element) {
+    element.value = text || "-";
+    return;
+  }
+
   element.textContent = text || "-";
+}
+
+function renderSelfTestGeneratedImages(imageUrls = [], imageError = "") {
+  if (!selftestGeneratedImages) {
+    return;
+  }
+
+  selftestGeneratedImages.innerHTML = "";
+  const urls = Array.isArray(imageUrls) ? imageUrls.filter(Boolean) : [];
+
+  if (!urls.length) {
+    const empty = document.createElement("div");
+    empty.className = "selftest-summary-empty";
+    empty.textContent = imageError || "当前还没有生成测试图片。";
+    selftestGeneratedImages.appendChild(empty);
+    return;
+  }
+
+  urls.forEach((url, index) => {
+    const item = document.createElement("figure");
+    item.className = "selftest-summary-thumb";
+    item.tabIndex = 0;
+    item.setAttribute("role", "button");
+    item.setAttribute("aria-label", `预览测试图 ${index + 1}`);
+    item.addEventListener("click", () => {
+      openImagePreview(urls, index);
+    });
+    item.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        openImagePreview(urls, index);
+      }
+    });
+
+    const img = document.createElement("img");
+    img.src = url;
+    img.alt = `自测生成图 ${index + 1}`;
+
+    const caption = document.createElement("figcaption");
+    caption.textContent = `测试图 ${index + 1}`;
+
+    item.append(img, caption);
+    selftestGeneratedImages.appendChild(item);
+  });
+}
+
+function openImagePreview(images, index = 0) {
+  const safeImages = Array.isArray(images) ? images.filter(Boolean) : [];
+  if (!safeImages.length || !imagePreviewModal || !imagePreviewImage) {
+    return;
+  }
+
+  imagePreviewState.images = safeImages;
+  imagePreviewState.index = Math.min(Math.max(index, 0), safeImages.length - 1);
+  syncImagePreview();
+  imagePreviewModal.classList.remove("hidden");
+  imagePreviewModal.setAttribute("aria-hidden", "false");
+  document.body.classList.add("is-preview-open");
+}
+
+function closeImagePreview() {
+  if (!imagePreviewModal) {
+    return;
+  }
+
+  imagePreviewModal.classList.add("hidden");
+  imagePreviewModal.setAttribute("aria-hidden", "true");
+  document.body.classList.remove("is-preview-open");
+}
+
+function moveImagePreview(direction) {
+  const total = imagePreviewState.images.length;
+  if (!total) {
+    return;
+  }
+
+  imagePreviewState.index = (imagePreviewState.index + direction + total) % total;
+  syncImagePreview();
+}
+
+function syncImagePreview() {
+  const total = imagePreviewState.images.length;
+  if (!total || !imagePreviewImage) {
+    return;
+  }
+
+  const currentImage = imagePreviewState.images[imagePreviewState.index];
+  imagePreviewImage.src = currentImage;
+  imagePreviewImage.alt = `预览图片 ${imagePreviewState.index + 1}`;
+
+  if (imagePreviewCaption) {
+    imagePreviewCaption.textContent = `${imagePreviewState.index + 1} / ${total}`;
+  }
+
+  const isMulti = total > 1;
+  imagePreviewPrev?.classList.toggle("hidden", !isMulti);
+  imagePreviewNext?.classList.toggle("hidden", !isMulti);
 }
 
 function updateSelfTestButtonState() {
@@ -621,6 +798,101 @@ function updateSelfTestButtonState() {
 
 function hasGeneratedPromptTemplates() {
   return isPromptTemplateTextReady(resultPrompt?.value) && isPromptTemplateTextReady(resultImagePrompt?.value);
+}
+
+function unwrapMarkdownCodeBlock(value) {
+  const normalized = String(value || "").trim();
+  if (!normalized) {
+    return "";
+  }
+
+  const match = normalized.match(/^```(?:markdown|md|json|text)?\s*\n([\s\S]*?)\n```$/i);
+  if (match && match[1]) {
+    return match[1].trim();
+  }
+
+  return normalized
+    .replace(/^```[\w-]*\s*/i, "")
+    .replace(/\s*```$/, "")
+    .trim();
+}
+
+function assessPromptTextQuality(target, promptText) {
+  const normalizedText = unwrapMarkdownCodeBlock(promptText);
+  const issues = [];
+  const missingPoints = [];
+
+  if (!normalizedText) {
+    issues.push("提示词为空或无法解析。");
+  }
+
+  if (normalizedText.length < (target === "image" ? 220 : 260)) {
+    issues.push("提示词过短，信息密度不足。");
+  }
+
+  if (!/^```[\w-]*\n[\s\S]*\n```$/m.test(String(promptText || "").trim())) {
+    issues.push("没有按 markdown 代码块输出。");
+  }
+
+  if (target === "rewrite") {
+    const requiredMarkers = [
+      "标题要求",
+      "开头钩子",
+      "正文结构",
+      "高频元素",
+      "结尾动作",
+      "标签策略",
+      "写作限制",
+    ];
+    const hitCount = requiredMarkers.filter((marker) => normalizedText.includes(marker)).length;
+
+    if (hitCount < 5) {
+      issues.push("rewrite_prompt 的结构模块不够完整，应包含标题要求、开头钩子、正文结构、高频元素、结尾动作、标签策略、写作限制等模块。");
+    }
+
+    if (!normalizedText.includes(WORKFLOW_TEMPLATE_VARIABLES.locationContext)) {
+      issues.push("rewrite_prompt 没有稳定使用用户输入变量。");
+    }
+
+    if (!/仿写|生文|提示词/.test(normalizedText)) {
+      issues.push("rewrite_prompt 没有体现它是给下游 AI 用的仿写提示词。");
+    }
+
+    if (!/实拍|真实|人味|口语|像素人/.test(normalizedText)) {
+      missingPoints.push("可以更明确保留原笔记的人味、口语感和真实分享感。");
+    }
+  } else {
+    if (!normalizedText.includes(WORKFLOW_TEMPLATE_VARIABLES.imageLocationContext)) {
+      issues.push("image_prompt 没有稳定使用图片信息变量。");
+    }
+
+    if (!/真实拍摄|实拍|真实摄影|素人实拍|实景/.test(normalizedText)) {
+      issues.push("image_prompt 的实拍感描述不够明确，应包含真实拍摄要求。");
+    }
+
+    if (!/构图|光线|色彩|质感|镜头|氛围/.test(normalizedText)) {
+      issues.push("image_prompt 的视觉要素太少，缺少可执行的画面语言，应包含构图、光线、色彩、质感、镜头、氛围等要素。");
+    }
+
+    if (!/提示词|prompt|成图/.test(normalizedText)) {
+      missingPoints.push("可以再加强它是可直接投喂生图模型的最终 prompt。");
+    }
+  }
+
+  const resultScore = Math.max(
+    0,
+    100 -
+    issues.length * 16 -
+    missingPoints.length * 6 -
+    Math.max(0, 220 - normalizedText.length) / 20
+  );
+  const pass = issues.length === 0 && resultScore >= 82;
+  return {
+    pass,
+    score: Math.max(0, Math.round(resultScore)),
+    issues,
+    missing_points: missingPoints,
+  };
 }
 
 function isPromptTemplateTextReady(value) {
@@ -758,8 +1030,27 @@ function resetSubmitButtonForNewInput() {
   setSubmitButtonState("idle");
 }
 
+function sanitizeUrlInputValue(value) {
+  return extractUrlFromText(value).trim();
+}
+
+function extractUrlFromText(value) {
+  const text = String(value || "").trim();
+  if (!text) {
+    return "";
+  }
+
+  const match = text.match(/https?:\/\/[^\s<>"']+/i);
+  if (!match) {
+    return text;
+  }
+
+  return match[0].replace(/[)\]}>）】》"'`,，。！!？?；;：:]+$/u, "");
+}
+
 function normalizeUrl(value) {
-  const completed = /^https?:\/\//i.test(value) ? value : `https://${value}`;
+  const extracted = extractUrlFromText(value);
+  const completed = /^https?:\/\//i.test(extracted) ? extracted : `https://${extracted}`;
   return new URL(completed).toString();
 }
 
@@ -799,7 +1090,6 @@ async function buildPromptRequestPayload(result, options = {}) {
       : typeof options.imageDirection === "string"
         ? options.imageDirection.trim()
         : "";
-
   const selfTest = await buildPromptSelfTestPayload();
 
   return {
@@ -875,11 +1165,21 @@ function buildFallbackResult(noteUrl, rawText) {
   };
 }
 
+function updateParseLinksActionState() {
+  if (!copyAllImagesButton) {
+    return;
+  }
+
+  copyAllImagesButton.textContent = "复制 JSON";
+  copyAllImagesButton.classList.remove("is-accent");
+}
+
 function renderResult(result) {
   currentParsedResult = result;
   currentRewritePromptRaw = null;
   currentImagePromptRaw = null;
   currentSelfTestRun = null;
+  updateParseLinksActionState();
   emptyState.classList.add("hidden");
   resultCard.classList.remove("hidden");
 
@@ -1043,9 +1343,11 @@ async function runSelfTest() {
   if (!currentParsedResult || !hasGeneratedPromptTemplates()) {
     currentSelfTestRun = {
       statusText: "未开始",
-      rewriteScoreText: "-",
-      imageScoreText: "-",
       summary: "请先生成仿写和生图 prompt，再执行自测。",
+      rewriteOutput: "-",
+      imageOutput: "-",
+      generatedImages: [],
+      imageError: "",
     };
     renderPromptSelfTestSummary();
     return;
@@ -1055,9 +1357,11 @@ async function runSelfTest() {
   setSelfTestButtonLoading(true);
   currentSelfTestRun = {
     statusText: "执行中",
-    rewriteScoreText: "-",
-    imageScoreText: "-",
-    summary: "正在执行自测，请稍候...",
+    summary: "正在代入变量并执行自测，请稍候...",
+    rewriteOutput: "正在生成生文自测结果...",
+    imageOutput: "正在整理生图自测结果...",
+    generatedImages: [],
+    imageError: "",
   };
   renderPromptSelfTestSummary();
 
@@ -1073,12 +1377,19 @@ async function runSelfTest() {
       return;
     }
 
-    const review = selfTestResult?.qualityReview || null;
     currentSelfTestRun = {
-      statusText: review?.pass ? "通过" : "未通过",
-      rewriteScoreText: formatPromptReviewScore(review?.rewrite),
-      imageScoreText: formatPromptReviewScore(review?.image),
-      summary: formatSelfTestSummaryText(review),
+      statusText: selfTestResult?.statusText || "完成",
+      summary: selfTestResult?.summary || "自测执行完成。",
+      rewriteOutput:
+        typeof selfTestResult?.rewriteOutput === "string" && selfTestResult.rewriteOutput.trim()
+          ? selfTestResult.rewriteOutput.trim()
+          : "-",
+      imageOutput:
+        typeof selfTestResult?.imageOutput === "string" && selfTestResult.imageOutput.trim()
+          ? selfTestResult.imageOutput.trim()
+          : "-",
+      generatedImages: Array.isArray(selfTestResult?.generatedImages) ? selfTestResult.generatedImages : [],
+      imageError: typeof selfTestResult?.imageError === "string" ? selfTestResult.imageError.trim() : "",
     };
   } catch (error) {
     if (requestId !== selfTestRequestSerial) {
@@ -1087,12 +1398,14 @@ async function runSelfTest() {
 
     currentSelfTestRun = {
       statusText: "失败",
-      rewriteScoreText: "-",
-      imageScoreText: "-",
       summary:
         error instanceof Error && error.message.trim()
           ? error.message.trim()
           : "自测失败，请稍后重试。",
+      rewriteOutput: "-",
+      imageOutput: "-",
+      generatedImages: [],
+      imageError: "",
     };
   } finally {
     if (requestId === selfTestRequestSerial) {
@@ -1153,26 +1466,6 @@ function formatPromptReviewScore(review) {
 
   const score = Number(review.score);
   return Number.isFinite(score) ? `${Math.round(score)}/100` : "-";
-}
-
-function formatSelfTestSummaryText(review) {
-  if (!review || typeof review !== "object") {
-    return "-";
-  }
-
-  if (review.summary) {
-    return String(review.summary).trim();
-  }
-
-  if (review.rewrite && review.image) {
-    const rewritePass = review.rewrite.pass ? "通过" : "未通过";
-    const imagePass = review.image.pass ? "通过" : "未通过";
-    const rewriteScore = formatPromptReviewScore(review.rewrite);
-    const imageScore = formatPromptReviewScore(review.image);
-    return `仿写 ${rewritePass}（${rewriteScore}），生图 ${imagePass}（${imageScore}）`;
-  }
-
-  return review.pass ? "通过" : "未通过";
 }
 
 async function regenerateRewritePrompt() {
@@ -2024,8 +2317,8 @@ function flashAllImagesButton(label) {
 }
 
 function resetAllImagesButton() {
-  copyAllImagesButton.textContent = "复制 JSON";
   copyAllImagesButton.classList.remove("is-copied");
+  updateParseLinksActionState();
 }
 
 function normalizeImages(result) {
@@ -2145,6 +2438,10 @@ function noteUrlToLabel(noteUrl) {
 }
 
 function toSourceImageUrl(imageUrl) {
+  if (/^(data|blob):/i.test(String(imageUrl || "").trim())) {
+    return String(imageUrl || "").trim();
+  }
+
   try {
     const parsed = new URL(imageUrl, window.location.origin);
     let sourceUrl = parsed;
@@ -2169,6 +2466,10 @@ function isVideoUrl(url) {
 function normalizeMediaUrlForList(sourceUrl) {
   const cleanUrl = new URL(sourceUrl.toString());
 
+  if (cleanUrl.protocol === "data:" || cleanUrl.protocol === "blob:") {
+    return cleanUrl.toString();
+  }
+
   for (const key of [...cleanUrl.searchParams.keys()]) {
     if (/^(w|h|width|height|quality|q|format|fit|resize|imageview2|x-oss-process|fm|fmt|ext)$/i.test(key)) {
       cleanUrl.searchParams.delete(key);
@@ -2182,6 +2483,10 @@ function normalizeMediaUrlForList(sourceUrl) {
 
 function toDownloadableMediaUrl(sourceUrl) {
   const cleanUrl = new URL(sourceUrl.toString());
+
+  if (cleanUrl.protocol === "data:" || cleanUrl.protocol === "blob:") {
+    return cleanUrl.toString();
+  }
   const pathname = cleanUrl.pathname;
   const explicitExt = getMediaExtensionFromPath(pathname);
   const inferredExt = explicitExt || inferMediaExtension(cleanUrl);
@@ -2236,6 +2541,10 @@ function inferMediaExtension(url) {
 }
 
 function buildImageDedupKey(imageUrl) {
+  if (/^(data|blob):/i.test(String(imageUrl || "").trim())) {
+    return String(imageUrl || "").trim();
+  }
+
   try {
     const parsed = new URL(imageUrl, window.location.origin);
     const proxied = parsed.pathname === "/api/image" ? parsed.searchParams.get("url") : "";

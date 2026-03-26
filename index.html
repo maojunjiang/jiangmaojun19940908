@@ -1,101 +1,85 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>笔记解析器</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700;800&display=swap"
-      rel="stylesheet"
-    />
-    <link rel="stylesheet" href="./styles.css?v=20260319-2" />
-  </head>
-  <body>
-    <div class="page-shell">
-      <header class="hero">
-        <div class="hero-copy">
-          <p class="eyebrow">Note Parser</p>
-          <h1>一条链接，拆出笔记核心内容</h1>
-          <p class="hero-text">
-            输入笔记链接，自动整理出图片、标题、正文、标签、媒体链接和仿写提示词。
-          </p>
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>笔记解析器</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700;800&display=swap"
+    rel="stylesheet" />
+  <link rel="stylesheet" href="./styles.css?v=20260319-2" />
+</head>
+
+<body>
+  <div class="page-shell">
+    <header class="hero">
+      <div class="hero-copy">
+        <p class="eyebrow">Note Parser</p>
+        <h1>一条链接，拆出笔记核心内容</h1>
+        <p class="hero-text">
+          输入笔记链接，自动整理出图片、标题、正文、标签、媒体链接和仿写提示词。
+        </p>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section class="panel input-panel">
+        <div class="panel-heading">
+          <h2>输入链接</h2>
+          <p>粘贴公开笔记链接后开始解析。</p>
         </div>
-      </header>
 
-      <main class="layout">
-        <section class="panel input-panel">
-          <div class="panel-heading">
-            <h2>输入链接</h2>
-            <p>粘贴公开笔记链接后开始解析。</p>
+        <form id="parse-form" class="parse-form">
+          <div class="field-head">
+            <label class="field-label" for="note-url">笔记链接</label>
+            <button type="button" id="history-button" class="history-button" aria-expanded="false">
+              历史记录
+            </button>
           </div>
-
-          <form id="parse-form" class="parse-form">
-            <div class="field-head">
-              <label class="field-label" for="note-url">笔记链接</label>
-              <button type="button" id="history-button" class="history-button" aria-expanded="false">
-                历史记录
-              </button>
+          <div class="input-row">
+            <div class="input-stack">
+              <input id="note-url" name="note-url" type="url" placeholder="https://example.com/note/123"
+                autocomplete="off" required />
+              <div id="history-menu" class="history-menu hidden" aria-label="历史链接列表"></div>
             </div>
-            <div class="input-row">
-              <div class="input-stack">
-                <input
-                  id="note-url"
-                  name="note-url"
-                  type="url"
-                  placeholder="https://example.com/note/123"
-                  autocomplete="off"
-                  required
-                />
-                <div id="history-menu" class="history-menu hidden" aria-label="历史链接列表"></div>
-              </div>
-              <button type="submit" id="submit-button">开始解析</button>
-            </div>
-          </form>
-
-          <div class="helper-grid">
-            <article class="helper-card">
-              <span class="helper-index">01</span>
-              <h3>自动提取</h3>
-              <p>优先提取标题、正文、标签和媒体资源链接。</p>
-            </article>
-            <article class="helper-card">
-              <span class="helper-index">02</span>
-              <h3>便于复用</h3>
-              <p>支持 JSON 复制和提示词编辑，方便接入工作流。</p>
-            </article>
+            <button type="submit" id="submit-button">开始解析</button>
           </div>
+        </form>
 
-        </section>
+        <div class="helper-grid">
+          <article class="helper-card">
+            <span class="helper-index">01</span>
+            <h3>自动提取</h3>
+            <p>优先提取标题、正文、标签和媒体资源链接。</p>
+          </article>
+          <article class="helper-card">
+            <span class="helper-index">02</span>
+            <h3>便于复用</h3>
+            <p>支持 JSON 复制和提示词编辑，方便接入工作流。</p>
+          </article>
+        </div>
 
-        <section class="panel tools-panel">
-          <div class="panel-heading">
-            <h2>生成模块</h2>
-            <p>这里展示解析结果和生成的提示词。</p>
-          </div>
+      </section>
 
-          <div class="panel-body tools-body">
-            <div class="tools-grid">
-            <div class="result-block result-block-links tools-block">
+      <section class="panel tools-panel">
+        <div class="panel-heading">
+          <h2>生成模块</h2>
+          <p>这里展示解析结果和生成的提示词。</p>
+        </div>
+
+        <div class="panel-body tools-body">
+          <div class="tools-grid">
+            <div id="parse-links-block" class="result-block result-block-links tools-block">
               <div class="result-block-head">
                 <div>
                   <span class="result-label">解析 URL</span>
                   <div class="media-link-tabs" role="tablist" aria-label="媒体链接类型">
-                    <button
-                      type="button"
-                      id="tab-images"
-                      class="media-link-tab is-active"
-                      data-media-tab="images"
-                    >
+                    <button type="button" id="tab-images" class="media-link-tab is-active" data-media-tab="images">
                       图片链接
                     </button>
-                    <button
-                      type="button"
-                      id="tab-videos"
-                      class="media-link-tab"
-                      data-media-tab="videos"
-                    >
+                    <button type="button" id="tab-videos" class="media-link-tab" data-media-tab="videos">
                       视频链接
                     </button>
                   </div>
@@ -109,7 +93,7 @@
 
             <div class="result-block result-block-prompt tools-block">
               <div class="result-block-head">
-              <span class="result-label">生文提示词模板</span>
+                <span class="result-label">生文提示词模板</span>
                 <div class="result-block-actions">
                   <button type="button" id="regenerate-prompt-button" class="copy-button">
                     重新生成
@@ -122,257 +106,217 @@
               <div class="prompt-block-body">
                 <div class="prompt-direction-group">
                   <label class="prompt-direction-label" for="rewrite-direction-input">和生文 AI 直接对话</label>
-                  <textarea
-                    id="rewrite-direction-input"
-                    class="prompt-direction-input"
-                    rows="2"
-                    placeholder="例如：请更口语化一点，更像真人探店，突出价格和口感对比，但不要编造原文没有的信息"
-                    spellcheck="false"
-                  ></textarea>
+                  <textarea id="rewrite-direction-input" class="prompt-direction-input" rows="2"
+                    placeholder="例如：请更口语化一点，更像真人探店，突出价格和口感对比，但不要编造原文没有的信息" spellcheck="false"></textarea>
                 </div>
-                <textarea
-                  id="result-prompt"
-                  class="prompt-editor result-content-scroll"
-                  spellcheck="false"
-                >-</textarea>
+                <textarea id="result-prompt" class="prompt-editor result-content-scroll" spellcheck="false">-</textarea>
                 <div class="prompt-debug-group">
                   <label class="prompt-direction-label" for="rewrite-messages-output">发送给模型的 messages</label>
-                  <textarea
-                    id="rewrite-messages-output"
-                    class="prompt-editor prompt-debug-output result-content-scroll"
-                    readonly
-                    spellcheck="false"
-                  >-</textarea>
+                  <textarea id="rewrite-messages-output" class="prompt-editor prompt-debug-output result-content-scroll"
+                    readonly spellcheck="false">-</textarea>
                 </div>
               </div>
             </div>
 
-              <div class="result-block result-block-image-prompt tools-block tools-block-wide">
-                <div class="result-block-head">
-              <span class="result-label">生图最终 Prompt</span>
-                  <div class="result-block-actions">
-                    <button type="button" id="regenerate-image-prompt-button" class="copy-button">
-                      重新生成
-                    </button>
-                    <button type="button" id="copy-image-prompt-button" class="copy-button">
-                      一键复制
-                    </button>
-                  </div>
+            <div class="result-block result-block-image-prompt tools-block tools-block-wide">
+              <div class="result-block-head">
+                <span class="result-label">生图最终 Prompt</span>
+                <div class="result-block-actions">
+                  <button type="button" id="regenerate-image-prompt-button" class="copy-button">
+                    重新生成
+                  </button>
+                  <button type="button" id="copy-image-prompt-button" class="copy-button">
+                    一键复制
+                  </button>
+                </div>
               </div>
               <div class="prompt-block-body">
                 <div class="prompt-direction-group">
                   <label class="prompt-direction-label" for="image-direction-input">和生图 AI 直接对话</label>
-                  <textarea
-                    id="image-direction-input"
-                    class="prompt-direction-input"
-                    rows="2"
-                    placeholder="例如：请更强调高级感和空间层次，保留参考图构图逻辑，但整体更像真实商业拍摄"
-                    spellcheck="false"
-                  ></textarea>
+                  <textarea id="image-direction-input" class="prompt-direction-input" rows="2"
+                    placeholder="例如：请更强调高级感和空间层次，保留参考图构图逻辑，但整体更像真实商业拍摄" spellcheck="false"></textarea>
                 </div>
-                <textarea
-                  id="result-image-prompt"
-                  class="prompt-editor result-content-scroll"
-                  spellcheck="false"
-                >-</textarea>
+                <textarea id="result-image-prompt" class="prompt-editor result-content-scroll"
+                  spellcheck="false">-</textarea>
                 <div class="prompt-debug-group">
                   <label class="prompt-direction-label" for="image-messages-output">发送给模型的 messages</label>
+                  <textarea id="image-messages-output" class="prompt-editor prompt-debug-output result-content-scroll"
+                    readonly spellcheck="false">-</textarea>
+                </div>
+              </div>
+            </div>
+          </div>
+      </section>
+
+      <section class="panel selftest-panel">
+        <div class="panel-heading selftest-panel-heading">
+          <div class="selftest-panel-title">
+            <h2>自测模块</h2>
+            <p>点击“自测”后，左侧填写的变量会代入当前 prompt 模板用于执行，但不会直接改写上方展示的模板原文。</p>
+          </div>
+          <button type="button" id="run-selftest-button" class="selftest-run-button" disabled>
+            自测
+          </button>
+        </div>
+
+        <div class="panel-body selftest-body">
+          <div class="selftest-grid">
+            <section class="variable-panel" id="prompt-variable-panel">
+              <div class="variable-panel-head">
+                <div>
+                  <span class="result-label">自测样本</span>
+                  <h3>给自检器填值</h3>
+                </div>
+                <p>这些值会在自测时代入生文、生图 prompt 模板对应变量，用于后端自检和判卷。</p>
+              </div>
+
+              <div class="variable-grid">
+                <label class="variable-field" for="prompt-location-input">
+                  <span>用户输入变量</span>
+                  <input id="prompt-location-input" type="text" placeholder="例如：杭州" autocomplete="off"
+                    spellcheck="false" />
+                </label>
+
+                <div class="variable-field variable-field-image">
+                  <span>图片信息变量</span>
+                  <div id="prompt-image-upload-zone" class="variable-upload-zone">
+                    <input id="prompt-image-upload-input" type="file" accept="image/*" multiple hidden />
+                    <button type="button" id="prompt-image-upload-button" class="variable-upload-button">
+                      选择图片或拖入这里
+                    </button>
+                    <p class="variable-upload-hint">支持多张图片，上传后会自动生成预览，并作为自测样本传给后端判卷。</p>
+                  </div>
+                  <textarea id="prompt-image-info-input" rows="3" placeholder="例如：希望代入图片信息变量的场景描述、风格要求、案例说明"
+                    spellcheck="false"></textarea>
+                  <div id="prompt-image-preview" class="variable-preview-grid" aria-label="已上传图片预览"></div>
+                </div>
+              </div>
+            </section>
+
+            <section class="selftest-summary-panel">
+              <div class="selftest-summary-head">
+                <div>
+                  <span class="result-label">自测结果展示</span>
+                  <h3>生成的 prompt 模板质量检查</h3>
+                </div>
+                <p>点击“自测”后，会把左侧变量代入当前模板，并展示实际跑出的生文结果和生图最终 Prompt。</p>
+              </div>
+
+              <div class="selftest-summary-list">
+                <article class="selftest-test-card">
+                  <div class="selftest-test-head">
+                    <span class="selftest-summary-key">执行状态</span>
+                  </div>
+                  <article class="selftest-summary-item">
+                    <span class="selftest-summary-key">执行状态</span>
+                    <strong id="selftest-status-value">未执行</strong>
+                  </article>
+                  <article class="selftest-summary-item">
+                    <span class="selftest-summary-key">摘要</span>
+                    <p id="selftest-summary-value">-</p>
+                  </article>
+                </article>
+
+                <article class="selftest-test-card">
+                  <div class="selftest-test-head">
+                    <span class="selftest-summary-key">生文模板变量代入结果</span>
+                  </div>
                   <textarea
-                    id="image-messages-output"
+                    id="selftest-rewrite-output"
                     class="prompt-editor prompt-debug-output result-content-scroll"
                     readonly
                     spellcheck="false"
                   >-</textarea>
-                </div>
-              </div>
-            </div>
-          </div>
-        </section>
+                </article>
 
-        <section class="panel selftest-panel">
-          <div class="panel-heading selftest-panel-heading">
-            <div class="selftest-panel-title">
-              <h2>自测模块</h2>
-              <p>这里的内容只参与提示词自检，不会直接改写下面展示的 prompt 文本。</p>
-            </div>
-            <button type="button" id="run-selftest-button" class="selftest-run-button" disabled>
-              自测
-            </button>
-          </div>
-
-          <div class="panel-body selftest-body">
-            <div class="selftest-grid">
-              <section class="variable-panel" id="prompt-variable-panel">
-                <div class="variable-panel-head">
-                  <div>
-                    <span class="result-label">自测样本</span>
-                    <h3>给自检器填值</h3>
+                <article class="selftest-test-card">
+                  <div class="selftest-test-head">
+                    <span class="selftest-summary-key">生图模板变量代入结果</span>
                   </div>
-                  <p>这些值只用于后端自检和判卷，不会改写下面的 prompt 展示内容。</p>
-                </div>
-
-                <div class="variable-grid">
-                  <label class="variable-field" for="prompt-location-input">
-                    <span>地点变量</span>
-                    <input
-                      id="prompt-location-input"
-                      type="text"
-                      placeholder="例如：杭州"
-                      autocomplete="off"
-                      spellcheck="false"
-                    />
-                  </label>
-
-                  <div class="variable-field variable-field-image">
-                    <span>自测图片和说明</span>
-                    <div id="prompt-image-upload-zone" class="variable-upload-zone">
-                      <input
-                        id="prompt-image-upload-input"
-                        type="file"
-                        accept="image/*"
-                        multiple
-                        hidden
-                      />
-                      <button type="button" id="prompt-image-upload-button" class="variable-upload-button">
-                        选择图片或拖入这里
-                      </button>
-                      <p class="variable-upload-hint">支持多张图片，上传后会自动生成预览，并作为自测样本传给后端判卷。</p>
-                    </div>
-                    <textarea
-                      id="prompt-image-info-input"
-                      rows="3"
-                      placeholder="例如：希望自测的实拍风格、案例说明、比对要求"
-                      spellcheck="false"
-                    ></textarea>
-                    <div id="prompt-image-preview" class="variable-preview-grid" aria-label="已上传图片预览"></div>
+                  <textarea
+                    id="selftest-image-output"
+                    class="prompt-editor prompt-debug-output result-content-scroll"
+                    readonly
+                    spellcheck="false"
+                  >-</textarea>
+                  <div id="selftest-generated-images" class="selftest-summary-media">
+                    <div class="selftest-summary-empty">当前还没有生成测试图片。</div>
                   </div>
-                </div>
-              </section>
-
-              <section class="selftest-summary-panel">
-                <div class="selftest-summary-head">
-                  <div>
-                    <span class="result-label">测试内容预览</span>
-                    <h3>当前自测输入和执行结果</h3>
-                  </div>
-                </div>
-
-                <div class="selftest-summary-list">
-                  <article class="selftest-test-card">
-                    <div class="selftest-test-head">
-                      <span class="selftest-summary-key">自测输入</span>
-                    </div>
-                    <div class="selftest-test-grid">
-                      <article class="selftest-summary-item">
-                        <span class="selftest-summary-key">地点变量</span>
-                        <strong id="selftest-location-value">-</strong>
-                      </article>
-                      <article class="selftest-summary-item">
-                        <span class="selftest-summary-key">图片说明</span>
-                        <p id="selftest-image-info-value">-</p>
-                      </article>
-                      <article class="selftest-summary-item selftest-summary-wide">
-                        <span class="selftest-summary-key">自测图片</span>
-                        <div class="selftest-summary-meta">
-                          <strong id="selftest-image-count-value">0 张</strong>
-                          <span>点击“自测”后会执行校验</span>
-                        </div>
-                        <div id="selftest-image-list" class="selftest-summary-media"></div>
-                      </article>
-                    </div>
-                  </article>
-
-                  <article class="selftest-test-card">
-                    <div class="selftest-test-head">
-                      <span class="selftest-summary-key">自测结果</span>
-                    </div>
-                    <article class="selftest-summary-item">
-                      <span class="selftest-summary-key">执行状态</span>
-                      <strong id="selftest-status-value">未执行</strong>
-                    </article>
-                    <article class="selftest-summary-item">
-                      <span class="selftest-summary-key">仿写测试</span>
-                      <strong id="selftest-rewrite-score-value">-</strong>
-                    </article>
-                    <article class="selftest-summary-item">
-                      <span class="selftest-summary-key">生图测试</span>
-                      <strong id="selftest-image-score-value">-</strong>
-                    </article>
-                    <article class="selftest-summary-item">
-                      <span class="selftest-summary-key">摘要</span>
-                      <p id="selftest-summary-value">-</p>
-                    </article>
-                  </article>
-                </div>
-              </section>
-            </div>
-          </div>
-        </section>
-
-        <section class="panel result-panel">
-          <div class="panel-heading">
-            <h2>解析结果</h2>
-            <p>展示图片、标题、正文和标签。</p>
-          </div>
-
-          <div id="empty-state" class="empty-state">
-            <div class="empty-orb"></div>
-            <h3>结果会显示在这里</h3>
-            <p>解析成功后，这里会展示图片、标题、正文和标签。</p>
-          </div>
-
-          <article id="result-card" class="result-card hidden" aria-live="polite">
-            <div class="result-media">
-              <div class="carousel-stage">
-                <img id="result-image" alt="解析出的笔记图片" src="" />
-                <div id="carousel-overlay" class="carousel-overlay hidden">
-                  <button
-                    type="button"
-                    id="carousel-prev"
-                    class="carousel-nav"
-                    aria-label="上一张图片"
-                  >
-                    <svg aria-hidden="true" viewBox="0 0 24 24">
-                      <path d="M14.5 5.5 8 12l6.5 6.5" />
-                    </svg>
-                  </button>
-                  <div id="carousel-counter" class="carousel-counter">1 / 1</div>
-                  <button
-                    type="button"
-                    id="carousel-next"
-                    class="carousel-nav"
-                    aria-label="下一张图片"
-                  >
-                    <svg aria-hidden="true" viewBox="0 0 24 24">
-                      <path d="M9.5 5.5 16 12l-6.5 6.5" />
-                    </svg>
-                  </button>
-                </div>
+                </article>
               </div>
-              <div id="carousel-dots" class="carousel-dots hidden" aria-label="图片预览列表"></div>
-            </div>
+            </section>
+          </div>
+        </div>
+      </section>
 
-            <div class="result-content">
-              <div class="result-block result-block-title">
-                <span class="result-label">标题</span>
-                <h3 id="result-title" class="result-content-scroll">-</h3>
-              </div>
+      <section class="panel result-panel">
+        <div class="panel-heading">
+          <h2>解析结果</h2>
+          <p>展示图片、标题、正文和标签。</p>
+        </div>
 
-              <div class="result-block result-block-body">
-                <span class="result-label">正文</span>
-                <p id="result-body" class="result-content-scroll">-</p>
-              </div>
+        <div id="empty-state" class="empty-state">
+          <div class="empty-orb"></div>
+          <h3>结果会显示在这里</h3>
+          <p>解析成功后，这里会展示图片、标题、正文和标签。</p>
+        </div>
 
-              <div class="result-block result-block-tags">
-                <span class="result-label">标签</span>
-                <div id="result-tags" class="tag-list result-content-scroll"></div>
+        <article id="result-card" class="result-card hidden" aria-live="polite">
+          <div class="result-media">
+            <div class="carousel-stage">
+              <img id="result-image" alt="解析出的笔记图片" src="" />
+              <div id="carousel-overlay" class="carousel-overlay hidden">
+                <button type="button" id="carousel-prev" class="carousel-nav" aria-label="上一张图片">
+                  <svg aria-hidden="true" viewBox="0 0 24 24">
+                    <path d="M14.5 5.5 8 12l6.5 6.5" />
+                  </svg>
+                </button>
+                <div id="carousel-counter" class="carousel-counter">1 / 1</div>
+                <button type="button" id="carousel-next" class="carousel-nav" aria-label="下一张图片">
+                  <svg aria-hidden="true" viewBox="0 0 24 24">
+                    <path d="M9.5 5.5 16 12l-6.5 6.5" />
+                  </svg>
+                </button>
               </div>
             </div>
-          </article>
-        </section>
-      </main>
+            <div id="carousel-dots" class="carousel-dots hidden" aria-label="图片预览列表"></div>
+          </div>
+
+          <div class="result-content">
+            <div class="result-block result-block-title">
+              <span class="result-label">标题</span>
+              <h3 id="result-title" class="result-content-scroll">-</h3>
+            </div>
+
+            <div class="result-block result-block-body">
+              <span class="result-label">正文</span>
+              <p id="result-body" class="result-content-scroll">-</p>
+            </div>
+
+            <div class="result-block result-block-tags">
+              <span class="result-label">标签</span>
+              <div id="result-tags" class="tag-list result-content-scroll"></div>
+            </div>
+          </div>
+        </article>
+      </section>
+    </main>
+  </div>
+
+  <div id="image-preview-modal" class="image-preview-modal hidden" aria-hidden="true">
+    <div class="image-preview-backdrop" data-preview-dismiss="true"></div>
+    <div class="image-preview-dialog" role="dialog" aria-modal="true" aria-label="图片预览">
+      <button type="button" id="image-preview-close" class="image-preview-close" aria-label="关闭预览">×</button>
+      <button type="button" id="image-preview-prev" class="image-preview-nav image-preview-nav-prev" aria-label="上一张">‹</button>
+      <figure class="image-preview-stage">
+        <img id="image-preview-image" alt="预览图片" src="" />
+        <figcaption id="image-preview-caption" class="image-preview-caption">图片预览</figcaption>
+      </figure>
+      <button type="button" id="image-preview-next" class="image-preview-nav image-preview-nav-next" aria-label="下一张">›</button>
     </div>
+  </div>
 
-    <script src="./script.js?v=20260320-3"></script>
-  </body>
+  <script src="./script.js?v=20260325-1"></script>
+</body>
+
 </html>
