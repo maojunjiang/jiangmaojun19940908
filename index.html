@@ -38,10 +38,10 @@
                 历史记录
               </button>
             </div>
-            <div class="input-row">
-              <div class="input-stack">
-                <input
-                  id="note-url"
+          <div class="input-row">
+            <div class="input-stack">
+              <input
+                id="note-url"
                   name="note-url"
                   type="url"
                   placeholder="https://example.com/note/123"
@@ -51,6 +51,23 @@
                 <div id="history-menu" class="history-menu hidden" aria-label="历史链接列表"></div>
               </div>
               <button type="submit" id="submit-button">开始解析</button>
+            </div>
+            <div class="field-head secondary-field-head">
+              <label class="field-label" for="auth-key">授权key</label>
+              <button type="button" id="auth-key-save-button" class="history-button auth-key-save-button">
+                保存
+              </button>
+            </div>
+            <div class="input-row secondary-input-row">
+              <div class="input-stack">
+                <input
+                  id="auth-key"
+                  name="auth-key"
+                  type="text"
+                  placeholder="请输入授权key"
+                  autocomplete="off"
+                />
+              </div>
             </div>
           </form>
 

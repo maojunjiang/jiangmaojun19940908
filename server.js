@@ -117,6 +117,7 @@ if (require.main === module) {
 async function handleParse(req, res) {
   const body = await readJsonBody(req);
   const inputUrl = typeof body.url === "string" ? body.url.trim() : "";
+  const authKey = typeof body.authKey === "string" ? body.authKey.trim() : "";
 
   if (!inputUrl) {
     writeJson(res, 400, { error: "缺少 url 参数。" });
@@ -133,7 +134,7 @@ async function handleParse(req, res) {
   }
 
   try {
-    const result = await parseNoteFromUrl(noteUrl);
+    const result = await parseNoteFromUrl(noteUrl, { authKey });
     writeJson(res, 200, buildClientResult(result));
   } catch (error) {
     writeJson(res, 502, {
@@ -144,14 +145,15 @@ async function handleParse(req, res) {
 }
 
 async function handlePromptGeneration(req, res) {
-  if (!isAiPromptConfigured()) {
+  const body = await readJsonBody(req);
+  const authKey = typeof body?.authKey === "string" ? body.authKey.trim() : "";
+
+  if (!isAiPromptConfigured(authKey)) {
     writeJson(res, 503, {
-      error: "AI 服务尚未配置，请补充 AI_API_BASE_URL 和 AI_API_TOKEN。",
+      error: "AI 服务尚未配置，请补充 AI_API_BASE_URL 和 AI_API_TOKEN，或在页面输入授权key。",
     });
     return;
   }
-
-  const body = await readJsonBody(req);
   const result = body?.result;
   const target = normalizePromptTarget(body?.target);
   const rewriteInstruction =
@@ -174,6 +176,7 @@ async function handlePromptGeneration(req, res) {
 
   try {
     const prompts = await generatePromptsWithAi(result, {
+      authKey,
       target,
       rewriteInstruction,
       imageInstruction,
@@ -193,6 +196,7 @@ async function handlePromptSelfTest(req, res) {
   const result = body?.result;
   const rewritePrompt = typeof body?.rewritePrompt === "string" ? body.rewritePrompt.trim() : "";
   const imagePrompt = typeof body?.imagePrompt === "string" ? body.imagePrompt.trim() : "";
+  const authKey = typeof body?.authKey === "string" ? body.authKey.trim() : "";
   const selfTest = normalizeSelfTestContext(body?.selfTest);
 
   if (!result || typeof result !== "object") {
@@ -206,15 +210,16 @@ async function handlePromptSelfTest(req, res) {
   }
 
   const generated = {
+    authKey,
     rewritePrompt,
     imagePrompt,
     debugMessages: [],
   };
 
   try {
-    const review = isAiPromptConfigured()
-      ? await reviewGeneratedPrompts(AI_PROVIDER, result, { target: "all" }, generated, selfTest)
-      : buildFallbackPromptReview("all", generated, result, { target: "all" }, selfTest);
+    const review = isAiPromptConfigured(authKey)
+      ? await reviewGeneratedPrompts(AI_PROVIDER, result, { target: "all", authKey }, generated, selfTest)
+      : buildFallbackPromptReview("all", generated, result, { target: "all", authKey }, selfTest);
 
     writeJson(res, 200, {
       qualityReview: review,
@@ -368,9 +373,10 @@ function normalizeUrl(value) {
   return new URL(completed).toString();
 }
 
-async function parseNoteFromUrl(noteUrl) {
+async function parseNoteFromUrl(noteUrl, options = {}) {
+  const authKey = typeof options?.authKey === "string" ? options.authKey.trim() : "";
   const directResponse = await fetch(noteUrl, {
-    headers: buildRemoteHeaders(noteUrl, "html"),
+    headers: buildRemoteHeaders(noteUrl, "html", { authorization: authKey }),
     redirect: "follow",
   });
 
@@ -416,8 +422,8 @@ async function tryProxyParse(noteUrl) {
   }
 }
 
-function isAiPromptConfigured() {
-  return Boolean(AI_API_BASE_URL && AI_API_TOKEN);
+function isAiPromptConfigured(authKey = "") {
+  return Boolean(AI_API_BASE_URL && resolveAiAuthToken(authKey));
 }
 
 function normalizePromptTarget(target) {
@@ -1272,15 +1278,29 @@ async function generatePromptsWithAiCore(result, options = {}) {
   }
 
   const endpointUrl = buildAiEndpointUrl();
+  const requestHeaders = buildAiRequestHeaders(options.authKey);
   const imageUrls = collectAiImageUrls(result);
   const target = normalizePromptTarget(options.target);
-  const enrichedResult =
-    target !== "rewrite" && imageUrls.length
-      ? {
-          ...result,
-          imageAnalyses: await requestVisionAnalyses(endpointUrl, buildAiRequestHeaders(), imageUrls),
-        }
-      : result;
+  const imageDebugMessages = [];
+  let enrichedResult = result;
+
+  if (target !== "rewrite" && imageUrls.length) {
+    imageDebugMessages.push(`阶段 1/2：开始分析参考图，共 ${imageUrls.length} 张`);
+
+    try {
+      enrichedResult = {
+        ...result,
+        imageAnalyses: await requestVisionAnalyses(endpointUrl, requestHeaders, imageUrls),
+      };
+      imageDebugMessages.push("阶段 1/2：参考图分析完成");
+    } catch (error) {
+      imageDebugMessages.push(
+        "阶段 1/2：参考图分析失败，已跳过图片分析并继续生成",
+        `请求接口：${endpointUrl}`,
+        `失败原因：${error instanceof Error ? error.message : "未知错误"}`
+      );
+    }
+  }
   const payload = {
     temperature: 0.2,
     messages: [
@@ -1313,7 +1333,7 @@ async function generatePromptsWithAiCore(result, options = {}) {
 
       const response = await fetch(endpointUrl, {
         method: "POST",
-        headers: buildAiRequestHeaders(),
+        headers: requestHeaders,
         body: JSON.stringify(requestPayload),
         signal: controller.signal,
       });
@@ -1349,7 +1369,7 @@ async function generatePromptsWithAiCore(result, options = {}) {
                   options.imageInstruction || options.imageDirection
                 )
               ),
-        debugMessages: target === "image" ? [] : payload.messages,
+        debugMessages: target === "image" ? imageDebugMessages : [...imageDebugMessages, ...payload.messages],
       };
     }
 
@@ -1373,7 +1393,8 @@ async function generatePromptsWithAiCore(result, options = {}) {
     */
   } catch (error) {
     if (error && typeof error === "object") {
-      error.debugMessages = target === "image" ? [] : payload.messages;
+      error.debugMessages =
+        target === "image" ? imageDebugMessages : [...imageDebugMessages, ...payload.messages];
     }
     throw error;
   } finally {
@@ -1383,6 +1404,7 @@ async function generatePromptsWithAiCore(result, options = {}) {
 
 async function generatePromptsWithGrobotaiCore(result, options = {}) {
   const endpointUrl = buildGrobotaiPromptUrl();
+  const requestHeaders = buildGrobotaiRequestHeaders(options.authKey);
   const imageUrls = collectAiImageUrls(result);
   const target = normalizePromptTarget(options.target);
   let enrichedResult = result;
@@ -1396,21 +1418,17 @@ async function generatePromptsWithGrobotaiCore(result, options = {}) {
         ...result,
         imageAnalyses: await requestVisionAnalyses(
           endpointUrl,
-          buildGrobotaiRequestHeaders(),
+          requestHeaders,
           imageUrls
         ),
       };
       imageDebugMessages.push("阶段 1/2：参考图分析完成");
     } catch (error) {
-      const visionError = new Error(
-        `图片分析失败：${error instanceof Error ? error.message : "未知错误"}`
-      );
-      visionError.debugMessages = [
-        ...imageDebugMessages,
+      imageDebugMessages.push(
+        "阶段 1/2：参考图分析失败，已跳过图片分析并继续生成",
         `参考图接口：${endpointUrl}`,
-        `失败原因：${visionError.message}`,
-      ];
-      throw visionError;
+        `失败原因：${error instanceof Error ? error.message : "未知错误"}`
+      );
     }
   }
 
@@ -1444,7 +1462,7 @@ async function generatePromptsWithGrobotaiCore(result, options = {}) {
 
       const response = await fetch(endpointUrl, {
         method: "POST",
-        headers: buildGrobotaiRequestHeaders(),
+        headers: requestHeaders,
         body: JSON.stringify(requestPayload),
         signal: controller.signal,
       });
@@ -1723,7 +1741,10 @@ function buildFallbackPromptReview(target, generated, result, options) {
 async function reviewGeneratedPrompts(providerName, result, options, generated, selfTest = null) {
   const target = normalizePromptTarget(options.target);
   const endpointUrl = providerName === "grobotai" ? buildGrobotaiPromptUrl() : buildAiEndpointUrl();
-  const headers = providerName === "grobotai" ? buildGrobotaiRequestHeaders() : buildAiRequestHeaders();
+  const headers =
+    providerName === "grobotai"
+      ? buildGrobotaiRequestHeaders(options.authKey)
+      : buildAiRequestHeaders(options.authKey);
   const selfTestImageAnalyses =
     Array.isArray(selfTest?.imageDataUrls) && selfTest.imageDataUrls.length
       ? await requestVisionAnalyses(endpointUrl, headers, selfTest.imageDataUrls)
@@ -2115,20 +2136,29 @@ function buildGrobotaiPromptUrl() {
   return new URL(GROBOTAI_PROMPT_PATH, AI_API_BASE_URL).toString();
 }
 
-function buildAiRequestHeaders() {
+function resolveAiAuthToken(authKey = "") {
+  const override = String(authKey || "").trim();
+  if (override) {
+    return override;
+  }
+
+  return AI_API_TOKEN;
+}
+
+function buildAiRequestHeaders(authKey = "") {
   const headers = {
     Accept: "application/json, text/event-stream",
-    Authorization: buildAuthorizationHeader(AI_API_TOKEN),
+    Authorization: buildAuthorizationHeader(resolveAiAuthToken(authKey)),
     "Content-Type": "application/json",
   };
 
   return headers;
 }
 
-function buildGrobotaiRequestHeaders() {
+function buildGrobotaiRequestHeaders(authKey = "") {
   const headers = {
     Accept: "application/json, text/event-stream",
-    Authorization: buildAuthorizationHeader(AI_API_TOKEN),
+    Authorization: buildAuthorizationHeader(resolveAiAuthToken(authKey)),
     "Content-Type": "application/json",
   };
 
@@ -4712,7 +4742,7 @@ function buildImageProxyUrl(imageUrl) {
   }
 }
 
-function buildRemoteHeaders(targetUrl, kind) {
+function buildRemoteHeaders(targetUrl, kind, options = {}) {
   const headers = {
     "User-Agent":
       "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
@@ -4727,6 +4757,11 @@ function buildRemoteHeaders(targetUrl, kind) {
   if (isXiaohongshuUrl(targetUrl) || /xhscdn\.com/i.test(targetUrl)) {
     headers.Referer = "https://www.xiaohongshu.com/";
     headers.Origin = "https://www.xiaohongshu.com";
+  }
+
+  const authorization = buildAuthorizationHeader(options?.authorization || "");
+  if (authorization) {
+    headers.Authorization = authorization;
   }
 
   return headers;

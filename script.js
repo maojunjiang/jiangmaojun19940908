@@ -1,5 +1,7 @@
 const form = document.querySelector("#parse-form");
 const urlInput = document.querySelector("#note-url");
+const authKeyInput = document.querySelector("#auth-key");
+const authKeySaveButton = document.querySelector("#auth-key-save-button");
 const submitButton = document.querySelector("#submit-button");
 const historyButton = document.querySelector("#history-button");
 const historyMenu = document.querySelector("#history-menu");
@@ -50,6 +52,7 @@ const MAX_REFERENCE_MEDIA = 14;
 const IMAGE_PROMPT_REFERENCE_LIMIT = 8;
 const DEFAULT_SUBMIT_BUTTON_TEXT = "开始解析";
 const HISTORY_STORAGE_KEY = "note-parser:url-history";
+const AUTH_KEY_STORAGE_KEY = "note-parser:auth-key";
 const PROMPT_VARIABLE_STORAGE_KEY = "note-parser:prompt-variable-values";
 const HISTORY_LIMIT = 12;
 
@@ -79,8 +82,10 @@ const swipeState = {
 let copyPromptResetTimer = 0;
 let copyAllImagesResetTimer = 0;
 let copyImagePromptResetTimer = 0;
+let authKeySaveResetTimer = 0;
 let rewritePromptRequestSerial = 0;
 let imagePromptRequestSerial = 0;
+let authKeyValue = loadAuthKeyValue();
 let urlHistory = loadUrlHistory();
 let currentParsedResult = null;
 let currentRewritePromptRaw = null;
@@ -97,6 +102,7 @@ const mediaLinkState = {
 
 warnIfOpenedFromFile();
 renderUrlHistory();
+syncAuthKeyInput();
 syncPromptVariableInputs();
 renderPromptSelfTestSummary();
 setSubmitButtonState("idle");
@@ -210,6 +216,23 @@ urlInput.addEventListener("input", () => {
 
 urlInput.addEventListener("change", () => {
   resetSubmitButtonForNewInput();
+});
+
+authKeyInput?.addEventListener("input", () => {
+  authKeyValue = authKeyInput.value.trim();
+});
+
+authKeySaveButton?.addEventListener("click", () => {
+  saveAuthKeyFromInput();
+});
+
+authKeyInput?.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter") {
+    return;
+  }
+
+  event.preventDefault();
+  saveAuthKeyFromInput();
 });
 
 carouselPrev.addEventListener("click", () => {
@@ -377,6 +400,50 @@ function saveUrlHistory() {
   } catch (error) {
     return;
   }
+}
+
+function loadAuthKeyValue() {
+  try {
+    const raw = window.localStorage.getItem(AUTH_KEY_STORAGE_KEY);
+    return typeof raw === "string" ? raw.trim() : "";
+  } catch (error) {
+    return "";
+  }
+}
+
+function saveAuthKeyValue(value) {
+  try {
+    window.localStorage.setItem(AUTH_KEY_STORAGE_KEY, String(value || "").trim());
+  } catch (error) {
+    return;
+  }
+}
+
+function syncAuthKeyInput() {
+  if (authKeyInput) {
+    authKeyInput.value = authKeyValue;
+  }
+}
+
+function saveAuthKeyFromInput() {
+  authKeyValue = typeof authKeyInput?.value === "string" ? authKeyInput.value.trim() : "";
+  saveAuthKeyValue(authKeyValue);
+  flashAuthKeySaveButton(authKeyValue ? "已保存" : "已清空");
+}
+
+function flashAuthKeySaveButton(label) {
+  if (!authKeySaveButton) {
+    return;
+  }
+
+  authKeySaveButton.textContent = label;
+  authKeySaveButton.classList.add("is-saved");
+
+  window.clearTimeout(authKeySaveResetTimer);
+  authKeySaveResetTimer = window.setTimeout(() => {
+    authKeySaveButton.textContent = "保存";
+    authKeySaveButton.classList.remove("is-saved");
+  }, 1500);
 }
 
 function loadPromptVariableState() {
@@ -764,12 +831,13 @@ function normalizeUrl(value) {
 }
 
 async function parseNoteFromUrl(noteUrl) {
+  const authKey = typeof authKeyInput?.value === "string" ? authKeyInput.value.trim() : "";
   const response = await fetch("/api/parse", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ url: noteUrl }),
+    body: JSON.stringify({ url: noteUrl, authKey }),
   });
 
   if (!response.ok) {
@@ -787,6 +855,7 @@ async function parseNoteFromUrl(noteUrl) {
 async function buildPromptRequestPayload(result, options = {}) {
   const target = normalizePromptTarget(options.target);
   const includeImages = target === "image" || target === "all";
+  const authKey = typeof authKeyInput?.value === "string" ? authKeyInput.value.trim() : "";
   const rewriteInstruction =
     typeof options.rewriteInstruction === "string"
       ? options.rewriteInstruction.trim()
@@ -811,6 +880,7 @@ async function buildPromptRequestPayload(result, options = {}) {
       images: includeImages ? collectMediaLinks(result).images : [],
     },
     target,
+    authKey,
     rewriteInstruction,
     imageInstruction: target === "rewrite" ? "" : imageInstruction,
     selfTest,
@@ -1103,12 +1173,16 @@ async function runSelfTest() {
 }
 
 async function requestSelfTestReview(payload) {
+  const authKey = typeof authKeyInput?.value === "string" ? authKeyInput.value.trim() : "";
   const response = await fetch("/api/selftest", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
     },
-    body: JSON.stringify(payload),
+    body: JSON.stringify({
+      ...payload,
+      authKey,
+    }),
   });
 
   const parsed = await response.json().catch(() => null);

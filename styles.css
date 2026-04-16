@@ -198,6 +198,15 @@ img {
   margin-bottom: 0;
 }
 
+.secondary-field-head {
+  margin-top: 16px;
+  justify-content: flex-start;
+}
+
+.secondary-input-row {
+  margin-bottom: 2px;
+}
+
 .input-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -301,6 +310,11 @@ img {
 }
 
 .history-button.is-open {
+  background: rgba(217, 255, 102, 0.42);
+  border-color: rgba(255, 99, 31, 0.22);
+}
+
+.auth-key-save-button.is-saved {
   background: rgba(217, 255, 102, 0.42);
   border-color: rgba(255, 99, 31, 0.22);
 }
